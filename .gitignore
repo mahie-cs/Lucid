@@ -40,3 +40,7 @@ signing.properties
 log.txt*.apk
 *.aab
 **/build/
+androidApp/release/
+mapping.txt
+*.apk
+*.aab
