@@ -1,0 +1,1266 @@
+package com.simohypers.lucid.viewModel
+
+import com.simohypers.lucid.domain.repository.LyricsCanvasRepository
+import com.simohypers.lucid.domain.data.model.lyrics.LyricsSource
+import androidx.lifecycle.viewModelScope
+import coil3.PlatformContext
+import coil3.SingletonImageLoader
+import coil3.annotation.ExperimentalCoilApi
+import com.eygraber.uri.Uri
+import com.simohypers.lucid.common.Config
+import com.simohypers.lucid.common.QUALITY
+import com.simohypers.lucid.common.STREAM_QUALITY
+import com.simohypers.lucid.common.SELECTED_LANGUAGE
+import com.simohypers.lucid.common.VIDEO_QUALITY
+import com.simohypers.lucid.domain.data.model.lyrics.RomanizationDictionaryState
+import com.simohypers.lucid.domain.data.player.GenericCastState
+import com.simohypers.lucid.domain.manager.DataStoreManager
+import com.simohypers.lucid.domain.mediaservice.handler.DownloadHandler
+import com.simohypers.lucid.domain.repository.AccountRepository
+import com.simohypers.lucid.domain.repository.ArtistRepository
+import com.simohypers.lucid.domain.repository.CacheRepository
+import com.simohypers.lucid.domain.repository.CommonRepository
+import com.simohypers.lucid.domain.repository.LyricsRomanizerRepository
+import com.simohypers.lucid.domain.repository.SongRepository
+import com.simohypers.lucid.logger.Logger
+import com.simohypers.lucid.updater.Updater
+import com.simohypers.lucid.utils.VersionManager
+import com.simohypers.lucid.utils.isPrerelease
+import com.simohypers.lucid.viewModel.base.BaseViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.koin.core.component.inject
+import org.jetbrains.compose.resources.getString as formatString
+import lucid.composeapp.generated.resources.Res
+import lucid.composeapp.generated.resources.backup_create_failed
+import lucid.composeapp.generated.resources.backup_create_success
+import lucid.composeapp.generated.resources.backup_in_progress
+import lucid.composeapp.generated.resources.cancel
+import lucid.composeapp.generated.resources.clear_canvas_cache
+import lucid.composeapp.generated.resources.clear_listening_history
+import lucid.composeapp.generated.resources.clear_downloaded_cache
+import lucid.composeapp.generated.resources.clear_listening_history_done
+import lucid.composeapp.generated.resources.clear_player_cache
+import lucid.composeapp.generated.resources.clear_thumbnail_cache
+import lucid.composeapp.generated.resources.error
+import lucid.composeapp.generated.resources.log_out_confirm_message
+import lucid.composeapp.generated.resources.proxy_saved_restart_to_apply
+import lucid.composeapp.generated.resources.restore_failed
+import lucid.composeapp.generated.resources.restore_in_progress
+import lucid.composeapp.generated.resources.romanization_japanese_dict_failed
+import lucid.composeapp.generated.resources.romanization_japanese_dict_ready
+import lucid.composeapp.generated.resources.warning
+import kotlin.coroutines.cancellation.CancellationException
+
+class SettingsViewModel(
+    private val dataStoreManager: DataStoreManager,
+    private val commonRepository: CommonRepository,
+    private val songRepository: SongRepository,
+    private val accountRepository: AccountRepository,
+    private val cacheRepository: CacheRepository,
+    private val artistRepository: ArtistRepository,
+    private val lyricsRomanizerRepository: LyricsRomanizerRepository,
+) : BaseViewModel() {
+    private val databasePath: String? = commonRepository.getDatabasePath()
+    private val downloadUtils: DownloadHandler by inject()
+    private val lyricsCanvasRepository: LyricsCanvasRepository by inject()
+
+    val castState: StateFlow<GenericCastState> get() = mediaPlayerHandler.castState
+
+    /** READY everywhere the dictionary is bundled (Desktop), so only Android ever leaves it. */
+    val japaneseDictionaryState: StateFlow<RomanizationDictionaryState> =
+        lyricsRomanizerRepository.japaneseDictionaryState
+
+    private var _location: MutableStateFlow<String?> = MutableStateFlow(null)
+    val location: StateFlow<String?> = _location
+    private var _language: MutableStateFlow<String?> = MutableStateFlow(null)
+    val language: StateFlow<String?> = _language
+    private var _loggedIn: MutableStateFlow<String?> = MutableStateFlow(null)
+    val loggedIn: StateFlow<String?> = _loggedIn
+    private var _normalizeVolume: MutableStateFlow<String?> = MutableStateFlow(null)
+    val normalizeVolume: StateFlow<String?> = _normalizeVolume
+    private var _skipSilent: MutableStateFlow<String?> = MutableStateFlow(null)
+    val skipSilent: StateFlow<String?> = _skipSilent
+    private var _savedPlaybackState: MutableStateFlow<String?> = MutableStateFlow(null)
+    val savedPlaybackState: StateFlow<String?> = _savedPlaybackState
+    private var _sendBackToGoogle: MutableStateFlow<String?> = MutableStateFlow(null)
+    val sendBackToGoogle: StateFlow<String?> = _sendBackToGoogle
+
+    private var _playerCacheLimit: MutableStateFlow<Int?> = MutableStateFlow(null)
+    val playerCacheLimit: StateFlow<Int?> = _playerCacheLimit
+    private var _playVideoInsteadOfAudio: MutableStateFlow<String?> = MutableStateFlow(null)
+    val playVideoInsteadOfAudio: StateFlow<String?> = _playVideoInsteadOfAudio
+
+    private var _radioAudioOnly: MutableStateFlow<String?> = MutableStateFlow(null)
+    val radioAudioOnly: StateFlow<String?> = _radioAudioOnly
+    private var _videoQuality: MutableStateFlow<String?> = MutableStateFlow(null)
+    val videoQuality: StateFlow<String?> = _videoQuality
+    private var _thumbCacheSize = MutableStateFlow<Long?>(null)
+    val thumbCacheSize: StateFlow<Long?> = _thumbCacheSize
+    private var _canvasCacheSize: MutableStateFlow<Long?> = MutableStateFlow(null)
+    val canvasCacheSize: StateFlow<Long?> = _canvasCacheSize
+    private var _usingProxy = MutableStateFlow(false)
+    val usingProxy: StateFlow<Boolean> = _usingProxy
+    private var _proxyType = MutableStateFlow(DataStoreManager.ProxyType.PROXY_TYPE_HTTP)
+    val proxyType: StateFlow<DataStoreManager.ProxyType> = _proxyType
+    private var _proxyHost = MutableStateFlow("")
+    val proxyHost: StateFlow<String> = _proxyHost
+    private var _proxyPort = MutableStateFlow(8000)
+    val proxyPort: StateFlow<Int> = _proxyPort
+    private var _proxyUsername = MutableStateFlow("")
+    val proxyUsername: StateFlow<String> = _proxyUsername
+    private var _proxyPassword = MutableStateFlow("")
+    val proxyPassword: StateFlow<String> = _proxyPassword
+    private val _crossfadeEnabled = MutableStateFlow<Boolean>(false)
+    val crossfadeEnabled: StateFlow<Boolean> = _crossfadeEnabled
+    private val _crossfadeDuration = MutableStateFlow<Int>(5000)
+    val crossfadeDuration: StateFlow<Int> = _crossfadeDuration
+    private val _crossfadeSkipAlbum = MutableStateFlow<Boolean>(false)
+    val crossfadeSkipAlbum: StateFlow<Boolean> = _crossfadeSkipAlbum
+    private val _downloadWifiOnly = MutableStateFlow(false)
+    val downloadWifiOnly: StateFlow<Boolean> = _downloadWifiOnly
+    val downloadLiked: StateFlow<Boolean> =
+        dataStoreManager.downloadLiked.map { it == DataStoreManager.TRUE }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    val updateBanner: StateFlow<Boolean> =
+        dataStoreManager.updateBanner.map { it != DataStoreManager.FALSE }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+
+    val updateNotification: StateFlow<Boolean> =
+        dataStoreManager.updateNotification.map { it != DataStoreManager.FALSE }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+
+    val betaUpdates: StateFlow<Boolean> =
+        dataStoreManager.betaUpdates
+            .map { Updater.isBeta() }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), isPrerelease(VersionManager.getVersionName()))
+    private val _lyricsOffsetMs = MutableStateFlow<Int>(0)
+    val lyricsOffsetMs: StateFlow<Int> = _lyricsOffsetMs
+    private val _preferredAudioLanguage = MutableStateFlow("")
+    val preferredAudioLanguage: StateFlow<String> = _preferredAudioLanguage
+
+    private var _backupDownloaded: MutableStateFlow<Boolean> = MutableStateFlow(false)
+    val backupDownloaded: StateFlow<Boolean> = _backupDownloaded
+
+
+    private val _explicitContentEnabled = MutableStateFlow(false)
+    val explicitContentEnabled: StateFlow<Boolean> = _explicitContentEnabled
+
+    private val _keepYouTubePlaylistOffline = MutableStateFlow<Boolean>(false)
+    val keepYouTubePlaylistOffline: StateFlow<Boolean> = _keepYouTubePlaylistOffline
+
+    private val _combineLocalAndYouTubeLiked = MutableStateFlow<Boolean>(false)
+    val combineLocalAndYouTubeLiked: StateFlow<Boolean> = _combineLocalAndYouTubeLiked
+
+    private val _downloadQuality = MutableStateFlow<String?>(null)
+    val downloadQuality: StateFlow<String?> = _downloadQuality
+
+    private val _videoDownloadQuality = MutableStateFlow<String?>(null)
+    val videoDownloadQuality: StateFlow<String?> = _videoDownloadQuality
+
+
+    // Auto Backup
+    private val _autoBackupEnabled = MutableStateFlow<Boolean>(false)
+    val autoBackupEnabled: StateFlow<Boolean> = _autoBackupEnabled
+
+    private val _autoBackupFrequency = MutableStateFlow<String>(DataStoreManager.AUTO_BACKUP_FREQUENCY_DAILY)
+    val autoBackupFrequency: StateFlow<String> = _autoBackupFrequency
+
+    private val _autoBackupMaxFiles = MutableStateFlow<Int>(5)
+    val autoBackupMaxFiles: StateFlow<Int> = _autoBackupMaxFiles
+
+    private val _autoBackupLastTime = MutableStateFlow<Long>(0L)
+    val autoBackupLastTime: StateFlow<Long> = _autoBackupLastTime
+
+    private var _alertData: MutableStateFlow<SettingAlertState?> = MutableStateFlow(null)
+    val alertData: StateFlow<SettingAlertState?> = _alertData
+
+    private var _basicAlertData: MutableStateFlow<SettingBasicAlertState?> = MutableStateFlow(null)
+    val basicAlertData: StateFlow<SettingBasicAlertState?> = _basicAlertData
+
+    // Fraction of storage
+    private var _fraction: MutableStateFlow<SettingsStorageSectionFraction> =
+        MutableStateFlow(
+            SettingsStorageSectionFraction(),
+        )
+    val fraction: StateFlow<SettingsStorageSectionFraction> = _fraction
+
+    // Biến để lưu trữ và hiển thị trạng thái killServiceOnExit
+    private var _killServiceOnExit: MutableStateFlow<String?> = MutableStateFlow(null)
+    val killServiceOnExit: StateFlow<String?> = _killServiceOnExit
+
+    init {
+        getPreferredAudioLanguage()
+    }
+
+    fun getAudioSessionId() = mediaPlayerHandler.player.audioSessionId
+
+    fun getData() {
+        getLocation()
+        getLanguage()
+        getQuality()
+        getPlayerCacheSize()
+        getDownloadedCacheSize()
+        getPlayerCacheLimit()
+        getLoggedIn()
+        getNormalizeVolume()
+        getSkipSilent()
+        getSavedPlaybackState()
+        getSendBackToGoogle()
+        getLyricsOffsetMs()
+        getPlayVideoInsteadOfAudio()
+        getRadioAudioOnly()
+        getVideoQuality()
+        getEqualizer()
+        getAMAnimatedArtwork()
+        getUsingProxy()
+        getCanvasCache()
+        getKillServiceOnExit()
+        getCrossfadeEnabled()
+        getCrossfadeDuration()
+        getCrossfadeSkipAlbum()
+        getDownloadWifiOnly()
+        getBackupDownloaded()
+        getExplicitContentEnabled()
+        getKeepYouTubePlaylistOffline()
+        getCombineLocalAndYouTubeLiked()
+        getDownloadQuality()
+        getVideoDownloadQuality()
+        getAutoBackupEnabled()
+        getAutoBackupFrequency()
+        getAutoBackupMaxFiles()
+        getAutoBackupLastTime()
+        viewModelScope.launch {
+            calculateDataFraction(
+                cacheRepository,
+            )?.let {
+                _fraction.value = it
+            }
+        }
+    }
+
+    private fun getDownloadQuality() {
+        viewModelScope.launch {
+            dataStoreManager.downloadQuality.collect { quality ->
+                _downloadQuality.emit(QUALITY.normalize(quality))
+            }
+        }
+    }
+
+    fun setDownloadQuality(quality: String) {
+        viewModelScope.launch {
+            dataStoreManager.setDownloadQuality(quality)
+            getDownloadQuality()
+        }
+    }
+
+    private fun getVideoDownloadQuality() {
+        viewModelScope.launch {
+            dataStoreManager.videoDownloadQuality.collect { videoQuality ->
+                when (videoQuality) {
+                    VIDEO_QUALITY.items[0].toString() -> _videoDownloadQuality.emit(VIDEO_QUALITY.items[0].toString())
+                    VIDEO_QUALITY.items[1].toString() -> _videoDownloadQuality.emit(VIDEO_QUALITY.items[1].toString())
+                    VIDEO_QUALITY.items[2].toString() -> _videoDownloadQuality.emit(VIDEO_QUALITY.items[2].toString())
+                }
+            }
+        }
+    }
+
+    fun setVideoDownloadQuality(quality: String) {
+        viewModelScope.launch {
+            if (VIDEO_QUALITY.items.contains(quality)) {
+                dataStoreManager.setVideoDownloadQuality(quality)
+            }
+            getVideoDownloadQuality()
+        }
+    }
+
+    private fun getKeepYouTubePlaylistOffline() {
+        viewModelScope.launch {
+            dataStoreManager.keepYouTubePlaylistOffline.collect { keep ->
+                _keepYouTubePlaylistOffline.value = keep == DataStoreManager.TRUE
+            }
+        }
+    }
+
+    fun setKeepYouTubePlaylistOffline(keep: Boolean) {
+        viewModelScope.launch {
+            dataStoreManager.setKeepYouTubePlaylistOffline(keep)
+            getKeepYouTubePlaylistOffline()
+        }
+    }
+
+    private fun getCombineLocalAndYouTubeLiked() {
+        viewModelScope.launch {
+            dataStoreManager.combineLocalAndYouTubeLiked.collect { combine ->
+                _combineLocalAndYouTubeLiked.value = combine == DataStoreManager.TRUE
+            }
+        }
+    }
+
+    fun setCombineLocalAndYouTubeLiked(combine: Boolean) {
+        viewModelScope.launch {
+            dataStoreManager.setCombineLocalAndYouTubeLiked(combine)
+            getCombineLocalAndYouTubeLiked()
+        }
+    }
+
+    private fun getCrossfadeEnabled() {
+        viewModelScope.launch {
+            dataStoreManager.crossfadeEnabled.collect { enabled ->
+                _crossfadeEnabled.value = enabled == DataStoreManager.TRUE
+            }
+        }
+    }
+
+    fun setCrossfadeEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            dataStoreManager.setCrossfadeEnabled(enabled)
+            getCrossfadeEnabled()
+        }
+    }
+
+    private fun getCrossfadeDuration() {
+        viewModelScope.launch {
+            dataStoreManager.crossfadeDuration.collect { duration ->
+                _crossfadeDuration.value = duration
+            }
+        }
+    }
+
+    fun setCrossfadeDuration(duration: Int) {
+        viewModelScope.launch {
+            dataStoreManager.setCrossfadeDuration(duration)
+            getCrossfadeDuration()
+        }
+    }
+
+
+    private fun getCrossfadeSkipAlbum() {
+        viewModelScope.launch {
+            dataStoreManager.crossfadeSkipAlbum.collect { enabled ->
+                _crossfadeSkipAlbum.value = enabled == DataStoreManager.TRUE
+            }
+        }
+    }
+
+    fun setCrossfadeSkipAlbum(enabled: Boolean) {
+        viewModelScope.launch {
+            // No re-read afterwards: the collector started in init never completes, so it already
+            // picks this up. Calling the getter again would leave a second collector running for
+            // the life of the ViewModel, one more per toggle.
+            dataStoreManager.setCrossfadeSkipAlbum(enabled)
+        }
+    }
+
+    private fun getDownloadWifiOnly() {
+        viewModelScope.launch {
+            dataStoreManager.downloadWifiOnly.collect { _downloadWifiOnly.value = it == DataStoreManager.TRUE }
+        }
+    }
+
+    fun setDownloadWifiOnly(enabled: Boolean) {
+        viewModelScope.launch { dataStoreManager.setDownloadWifiOnly(enabled) }
+    }
+
+    fun setUpdateBanner(enabled: Boolean) {
+        viewModelScope.launch {
+            dataStoreManager.setUpdateBanner(enabled)
+            if (enabled) Updater.checkQuiet() else Updater.dismiss()
+        }
+    }
+
+    fun setUpdateNotification(enabled: Boolean) {
+        viewModelScope.launch { dataStoreManager.setUpdateNotification(enabled) }
+    }
+
+    fun setBetaUpdates(enabled: Boolean) {
+        viewModelScope.launch {
+            dataStoreManager.setBetaUpdates(enabled)
+            Updater.recheck()
+        }
+    }
+
+    fun setDownloadLiked(enabled: Boolean) {
+        viewModelScope.launch { dataStoreManager.setDownloadLiked(enabled) }
+    }
+
+    private fun getExplicitContentEnabled() {
+        viewModelScope.launch {
+            dataStoreManager.explicitContentEnabled.collect { enabled ->
+                _explicitContentEnabled.value = enabled == DataStoreManager.TRUE
+            }
+        }
+    }
+
+    fun setExplicitContentEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            dataStoreManager.setExplicitContentEnabled(enabled)
+            getExplicitContentEnabled()
+        }
+    }
+
+    private fun getBackupDownloaded() {
+        viewModelScope.launch {
+            dataStoreManager.backupDownloaded.collect { backupDownloaded ->
+                _backupDownloaded.value = backupDownloaded == DataStoreManager.TRUE
+            }
+        }
+    }
+
+    fun setBackupDownloaded(backupDownloaded: Boolean) {
+        viewModelScope.launch {
+            dataStoreManager.setBackupDownloaded(backupDownloaded)
+            getBackupDownloaded()
+        }
+    }
+
+    // Auto Backup functions
+    private fun getAutoBackupEnabled() {
+        viewModelScope.launch {
+            dataStoreManager.autoBackupEnabled.collect { enabled ->
+                _autoBackupEnabled.value = enabled == DataStoreManager.TRUE
+            }
+        }
+    }
+
+    fun setAutoBackupEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            dataStoreManager.setAutoBackupEnabled(enabled)
+            getAutoBackupEnabled()
+        }
+    }
+
+    private fun getAutoBackupFrequency() {
+        viewModelScope.launch {
+            dataStoreManager.autoBackupFrequency.collect { frequency ->
+                _autoBackupFrequency.value = frequency
+            }
+        }
+    }
+
+    fun setAutoBackupFrequency(frequency: String) {
+        viewModelScope.launch {
+            dataStoreManager.setAutoBackupFrequency(frequency)
+            getAutoBackupFrequency()
+        }
+    }
+
+    private fun getAutoBackupMaxFiles() {
+        viewModelScope.launch {
+            dataStoreManager.autoBackupMaxFiles.collect { max ->
+                _autoBackupMaxFiles.value = max
+            }
+        }
+    }
+
+    fun setAutoBackupMaxFiles(max: Int) {
+        viewModelScope.launch {
+            dataStoreManager.setAutoBackupMaxFiles(max)
+            getAutoBackupMaxFiles()
+        }
+    }
+
+    private fun getAutoBackupLastTime() {
+        viewModelScope.launch {
+            dataStoreManager.autoBackupLastTime.collect { time ->
+                _autoBackupLastTime.value = time
+            }
+        }
+    }
+
+    private fun getCanvasCache() {
+        viewModelScope.launch {
+            _canvasCacheSize.value = cacheRepository.getCacheSize(Config.CANVAS_CACHE)
+        }
+    }
+
+    fun setAlertData(alertData: SettingAlertState?) {
+        _alertData.value = alertData
+    }
+
+    fun setBasicAlertData(alertData: SettingBasicAlertState?) {
+        _basicAlertData.value = alertData
+    }
+
+    /**
+     * Asks before signing out of a linked account.
+     *
+     * Every one of these rows sits inside a long settings list and does its work on a single tap,
+     * with no undo — and getting back in is not symmetric with getting out: Last.fm sends the user
+     * through a browser again, YouTube and Spotify through a full web login. The confirmation is
+     * cheap next to that.
+     *
+     * @param confirmLabel names the service on the confirming button, because the dialog is the
+     * only thing on screen at that moment and "Log out" alone does not say out of what.
+     */
+    fun confirmLogOut(
+        confirmLabel: String,
+        onConfirm: () -> Unit,
+    ) {
+        viewModelScope.launch {
+            setBasicAlertData(
+                SettingBasicAlertState(
+                    title = getString(Res.string.warning),
+                    message = getString(Res.string.log_out_confirm_message),
+                    confirm = confirmLabel to onConfirm,
+                    dismiss = getString(Res.string.cancel),
+                ),
+            )
+        }
+    }
+
+    private fun getUsingProxy() {
+        viewModelScope.launch {
+            dataStoreManager.usingProxy.collectLatest { usingProxy ->
+                if (usingProxy == DataStoreManager.TRUE) {
+                    getProxy()
+                }
+                _usingProxy.value = usingProxy == DataStoreManager.TRUE
+            }
+        }
+    }
+
+    fun setUsingProxy(usingProxy: Boolean) {
+        viewModelScope.launch {
+            dataStoreManager.setUsingProxy(usingProxy)
+            getUsingProxy()
+            getProxy()
+            proxyNeedsRestart()
+        }
+    }
+
+    private fun getProxy() {
+        viewModelScope.launch {
+            val host =
+                launch {
+                    dataStoreManager.proxyHost.collect {
+                        _proxyHost.value = it
+                    }
+                }
+            val port =
+                launch {
+                    dataStoreManager.proxyPort.collect {
+                        _proxyPort.value = it
+                    }
+                }
+            val type =
+                launch {
+                    dataStoreManager.proxyType.collect {
+                        _proxyType.value = it
+                        log("getProxy: $it")
+                    }
+                }
+            val username =
+                launch {
+                    dataStoreManager.proxyUsername.collect {
+                        _proxyUsername.value = it
+                    }
+                }
+            val password =
+                launch {
+                    dataStoreManager.proxyPassword.collect {
+                        _proxyPassword.value = it
+                    }
+                }
+            host.join()
+            port.join()
+            type.join()
+            username.join()
+            password.join()
+        }
+    }
+
+    fun setProxy(
+        proxyType: DataStoreManager.ProxyType,
+        host: String,
+        port: Int,
+    ) {
+        log("setProxy: $proxyType, $host, $port")
+        viewModelScope.launch {
+            dataStoreManager.setProxyType(proxyType)
+            dataStoreManager.setProxyHost(host)
+            dataStoreManager.setProxyPort(port)
+            proxyNeedsRestart()
+        }
+    }
+
+    fun setProxyCredentials(
+        username: String,
+        password: String,
+    ) {
+        log("setProxyCredentials: username=$username")
+        viewModelScope.launch {
+            dataStoreManager.setProxyUsername(username)
+            dataStoreManager.setProxyPassword(password)
+            proxyNeedsRestart()
+        }
+    }
+
+    /** Every client reads the proxy once, at startup (CommonRepositoryImpl, getJVMProxy). */
+    private suspend fun proxyNeedsRestart() = makeToast(getString(Res.string.proxy_saved_restart_to_apply))
+
+    fun getThumbCacheSize(context: PlatformContext) {
+        viewModelScope.launch {
+            val diskCache = SingletonImageLoader.get(context).diskCache
+            _thumbCacheSize.emit(diskCache?.size)
+        }
+    }
+
+    fun getVideoQuality() {
+        viewModelScope.launch {
+            dataStoreManager.videoQuality.collect { videoQuality ->
+                when (videoQuality) {
+                    VIDEO_QUALITY.items[0].toString() -> _videoQuality.emit(VIDEO_QUALITY.items[0].toString())
+                    VIDEO_QUALITY.items[1].toString() -> _videoQuality.emit(VIDEO_QUALITY.items[1].toString())
+                    VIDEO_QUALITY.items[2].toString() -> _videoQuality.emit(VIDEO_QUALITY.items[2].toString())
+                }
+            }
+        }
+    }
+
+    private fun getLyricsOffsetMs() {
+        viewModelScope.launch {
+            dataStoreManager.lyricsOffsetMs.collect { offsetMs ->
+                _lyricsOffsetMs.emit(offsetMs)
+            }
+        }
+    }
+
+    // Deliberately does NOT re-call its getter the way the settings around it do: that getter
+    // collects forever, so calling it again on every write leaves another collector running for the
+    // life of the ViewModel. The one started in init already publishes this value.
+    fun setLyricsOffsetMs(offsetMs: Int) {
+        viewModelScope.launch {
+            dataStoreManager.setLyricsOffsetMs(offsetMs)
+        }
+    }
+
+    /** Every lyrics source in the user's order, with its switch. */
+    val lyricsProviders: StateFlow<List<Pair<LyricsSource, Boolean>>> =
+        dataStoreManager.lyricsProviders
+            .map { LyricsSource.order(it) }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), LyricsSource.order(null))
+
+    /**
+     * Save the lyrics order (null: back to the default). Cached lyrics outlive the order that found
+     * them, so they go too, except songs whose source was picked by hand.
+     */
+    fun setLyricsProviders(order: List<Pair<LyricsSource, Boolean>>?) {
+        viewModelScope.launch {
+            dataStoreManager.setLyricsProviders(order?.let(LyricsSource::encode).orEmpty())
+            lyricsCanvasRepository.clearUnpinnedLyrics()
+        }
+    }
+
+    private var japaneseDictionaryWaiter: Job? = null
+
+    /**
+     * Fetches the Japanese romanization dictionary if this platform needs one and does not have
+     * it yet. Called from the settings screen every time a saved selection includes Japanese, so
+     * a FAILED attempt is retried by simply confirming the dialog again; READY makes this a no-op.
+     * A download already running — the repository starts one by itself when it finds Japanese
+     * selected and the pack missing — is joined rather than skipped, so its outcome still gets a
+     * toast. Progress and outcome live in [japaneseDictionaryState], which the romanization row's
+     * subtitle watches. The download runs in the repository's own scope, so leaving Settings
+     * mid-way only loses the toast below, not the download.
+     */
+    fun downloadJapaneseDictionaryIfNeeded() {
+        if (japaneseDictionaryState.value == RomanizationDictionaryState.READY) return
+        // Saving the dialog again mid-download (say, to add Korean) would otherwise queue a
+        // second waiter and show the same toast twice. Checked against DOWNLOADING as well: a
+        // waiter outlives its download by the moment it takes to show the toast, and a save in
+        // that moment, after a failure, is a real retry.
+        if (japaneseDictionaryWaiter?.isActive == true &&
+            japaneseDictionaryState.value == RomanizationDictionaryState.DOWNLOADING
+        ) {
+            return
+        }
+        japaneseDictionaryWaiter = viewModelScope.launch {
+            // The state the download settled on, as the repository saw it end. Reading
+            // japaneseDictionaryState back afterwards could already show the next attempt.
+            when (lyricsRomanizerRepository.downloadJapaneseDictionary()) {
+                RomanizationDictionaryState.READY ->
+                    makeToast(getString(Res.string.romanization_japanese_dict_ready))
+                RomanizationDictionaryState.FAILED ->
+                    makeToast(getString(Res.string.romanization_japanese_dict_failed))
+                else -> {}
+            }
+        }
+    }
+
+    fun getLocation() {
+        viewModelScope.launch {
+            dataStoreManager.location.collect { location ->
+                _location.emit(location)
+            }
+        }
+    }
+
+    fun getLoggedIn() {
+        viewModelScope.launch {
+            dataStoreManager.loggedIn.collect { loggedIn ->
+                _loggedIn.emit(loggedIn)
+            }
+        }
+    }
+
+    fun changeLocation(location: String) {
+        viewModelScope.launch {
+            dataStoreManager.setLocation(location)
+            getLocation()
+        }
+    }
+
+    fun getPlayVideoInsteadOfAudio() {
+        viewModelScope.launch {
+            dataStoreManager.watchVideoInsteadOfPlayingAudio.collect { playVideoInsteadOfAudio ->
+                _playVideoInsteadOfAudio.emit(playVideoInsteadOfAudio)
+            }
+        }
+    }
+
+    fun setPlayVideoInsteadOfAudio(playVideoInsteadOfAudio: Boolean) {
+        viewModelScope.launch {
+            dataStoreManager.setWatchVideoInsteadOfPlayingAudio(playVideoInsteadOfAudio)
+            getPlayVideoInsteadOfAudio()
+        }
+    }
+
+    fun getRadioAudioOnly() {
+        viewModelScope.launch {
+            dataStoreManager.radioAudioOnly.collect { radioAudioOnly ->
+                _radioAudioOnly.emit(radioAudioOnly)
+            }
+        }
+    }
+
+    /**
+     * No re-collect after writing, unlike the settings above: [getRadioAudioOnly] already collects
+     * the DataStore flow, which emits again on every write. Calling the getter here would only
+     * stack a second collector on each toggle.
+     */
+    fun setRadioAudioOnly(audioOnly: Boolean) {
+        viewModelScope.launch {
+            dataStoreManager.setRadioAudioOnly(audioOnly)
+        }
+    }
+
+    private var _quality: MutableStateFlow<String?> = MutableStateFlow(null)
+    val quality: StateFlow<String?> = _quality
+
+    fun getQuality() {
+        viewModelScope.launch {
+            dataStoreManager.quality.collect { quality ->
+                _quality.emit(STREAM_QUALITY.normalize(quality))
+            }
+        }
+    }
+
+    fun changeVideoQuality(item: String) {
+        viewModelScope.launch {
+            if (VIDEO_QUALITY.items.contains(item)) {
+                dataStoreManager.setVideoQuality(item)
+            }
+            getVideoQuality()
+        }
+    }
+
+    fun changeQuality(qualityItem: String?) {
+        viewModelScope.launch {
+            log("changeQuality: $qualityItem")
+            dataStoreManager.setQuality(qualityItem ?: STREAM_QUALITY.HIGH)
+            getQuality()
+        }
+    }
+
+    private val _cacheSize: MutableStateFlow<Long?> = MutableStateFlow(null)
+    var cacheSize: StateFlow<Long?> = _cacheSize
+
+    fun getPlayerCacheSize() {
+        viewModelScope.launch {
+            _cacheSize.value = cacheRepository.getCacheSize(Config.PLAYER_CACHE)
+        }
+    }
+
+    fun clearPlayerCache() {
+        viewModelScope.launch {
+            cacheRepository.clearCache(Config.PLAYER_CACHE)
+            makeToast(getString(Res.string.clear_player_cache))
+            getPlayerCacheSize()
+        }
+    }
+
+    private val _downloadedCacheSize: MutableStateFlow<Long?> = MutableStateFlow(null)
+    var downloadedCacheSize: StateFlow<Long?> = _downloadedCacheSize
+
+    fun getDownloadedCacheSize() {
+        viewModelScope.launch {
+            _downloadedCacheSize.value = cacheRepository.getCacheSize(Config.DOWNLOAD_CACHE)
+        }
+    }
+
+    fun clearDownloadedCache() {
+        viewModelScope.launch {
+            downloadUtils.removeAllDownloads()
+            cacheRepository.clearCache(Config.DOWNLOAD_CACHE)
+            songRepository.forgetAllDownloads()
+            makeToast(getString(Res.string.clear_downloaded_cache))
+            getDownloadedCacheSize()
+        }
+    }
+
+    fun clearCanvasCache() {
+        viewModelScope.launch {
+            cacheRepository.clearCache(Config.CANVAS_CACHE)
+            makeToast(getString(Res.string.clear_canvas_cache))
+            getCanvasCache()
+        }
+    }
+
+    fun clearListeningHistory() {
+        viewModelScope.launch {
+            // The sweep walks every container table and then the whole song table, and finishes with
+            // a VACUUM — seconds of work on a large library, and the screen would look frozen.
+            showLoadingDialog(getString(Res.string.clear_listening_history))
+            val removed =
+                try {
+                    // NonCancellable because the sweep is only coherent once it has finished: the
+                    // cached containers are deleted first and the songs they were holding alive
+                    // last, so a run stopped in between — the user leaving Settings is enough to do
+                    // it — has already dropped every cached playlist, album and artist and left the
+                    // songs behind. Nothing resumes it afterwards, so it has to run to the end.
+                    withContext(NonCancellable) { songRepository.clearHistoryAndOrphanedSongs() }
+                } catch (e: CancellationException) {
+                    // Not a failure, and it must not be swallowed: catching it breaks structured
+                    // concurrency, and it would put the generic error toast in front of a user whose
+                    // sweep had in fact just completed, inviting them to run the whole thing again.
+                    throw e
+                } catch (e: Throwable) {
+                    Logger.e(tag, "clearHistoryAndOrphanedSongs failed: ${e.stackTraceToString()}")
+                    null
+                } finally {
+                    // In a finally so a failure — or the user leaving the screen — cannot strand the
+                    // dialog on top of the app with no way to dismiss it.
+                    hideLoadingDialog()
+                }
+            if (removed == null) {
+                makeToast(getString(Res.string.error))
+                return@launch
+            }
+            makeToast(formatString(Res.string.clear_listening_history_done, removed))
+            // Only the database slice of the storage bar moved; getData() would also restart every
+            // collecting getter it owns.
+            calculateDataFraction(cacheRepository)?.let { _fraction.value = it }
+        }
+    }
+
+    fun backup(uri: Uri) {
+        viewModelScope.launch {
+            runCatching {
+                makeToast(getString(Res.string.backup_in_progress))
+                withContext(Dispatchers.IO) {
+                    backupNative(commonRepository, uri, backupDownloaded.value)
+                }
+            }.onSuccess {
+                withContext(Dispatchers.Main) {
+                    makeToast(getString(Res.string.backup_create_success))
+                }
+            }.onFailure {
+                withContext(Dispatchers.Main) {
+                    Logger.w("SettingsViewModel", "backup: $it")
+                    makeToast(getString(Res.string.backup_create_failed))
+                }
+            }
+        }
+    }
+
+    fun restore(uri: Uri) {
+        viewModelScope.launch {
+            makeToast(getString(Res.string.restore_in_progress))
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    restoreNative(commonRepository, uri) {
+                        getData()
+                    }
+                }.onFailure {
+                    withContext(Dispatchers.Main) {
+                        Logger.w("SettingsViewModel", "restore: $it")
+                        makeToast(getString(Res.string.restore_failed))
+                    }
+                }
+            }
+        }
+    }
+
+    fun getLanguage() {
+        viewModelScope.launch {
+            dataStoreManager.getString(SELECTED_LANGUAGE).collect { language ->
+                _language.emit(language)
+            }
+        }
+    }
+
+    fun changeLanguage(code: String) {
+        viewModelScope.launch {
+            dataStoreManager.putString(SELECTED_LANGUAGE, code)
+            Logger.d("SettingsViewModel", "changeLanguage: $code")
+            getLanguage()
+            changeLanguageNative(code)
+        }
+    }
+
+    fun getNormalizeVolume() {
+        viewModelScope.launch {
+            dataStoreManager.normalizeVolume.collect { normalizeVolume ->
+                _normalizeVolume.emit(normalizeVolume)
+            }
+        }
+    }
+
+    fun setNormalizeVolume(normalizeVolume: Boolean) {
+        viewModelScope.launch {
+            dataStoreManager.setNormalizeVolume(normalizeVolume)
+            getNormalizeVolume()
+        }
+    }
+
+    fun getSendBackToGoogle() {
+        viewModelScope.launch {
+            dataStoreManager.sendBackToGoogle.collect { sendBackToGoogle ->
+                _sendBackToGoogle.emit(sendBackToGoogle)
+            }
+        }
+    }
+
+    fun setSendBackToGoogle(sendBackToGoogle: Boolean) {
+        viewModelScope.launch {
+            dataStoreManager.setSendBackToGoogle(sendBackToGoogle)
+            getSendBackToGoogle()
+        }
+    }
+
+    fun getSkipSilent() {
+        viewModelScope.launch {
+            dataStoreManager.skipSilent.collect { skipSilent ->
+                _skipSilent.emit(skipSilent)
+            }
+        }
+    }
+
+    fun setSkipSilent(skip: Boolean) {
+        viewModelScope.launch {
+            dataStoreManager.setSkipSilent(skip)
+            getSkipSilent()
+        }
+    }
+
+    fun getSavedPlaybackState() {
+        viewModelScope.launch {
+            dataStoreManager.saveStateOfPlayback.collect { savedPlaybackState ->
+                _savedPlaybackState.emit(savedPlaybackState)
+            }
+        }
+    }
+
+    /** Desktop's queue settings: DataStore keys holding "true" or "false", off by default. */
+    fun queueSetting(key: String) = dataStoreManager.getString(key).map { it == "true" }
+
+    fun setQueueSetting(
+        key: String,
+        on: Boolean,
+    ) {
+        viewModelScope.launch { dataStoreManager.putString(key, on.toString()) }
+    }
+
+    val autoplay = dataStoreManager.endlessQueue.map { it == DataStoreManager.TRUE }
+
+    fun setAutoplay(on: Boolean) {
+        viewModelScope.launch { dataStoreManager.setEndlessQueue(on) }
+    }
+
+    fun setSavedPlaybackState(savedPlaybackState: Boolean) {
+        viewModelScope.launch {
+            dataStoreManager.setSaveStateOfPlayback(savedPlaybackState)
+            getSavedPlaybackState()
+        }
+    }
+
+    fun getPlayerCacheLimit() {
+        viewModelScope.launch {
+            dataStoreManager.maxSongCacheSize.collect {
+                _playerCacheLimit.emit(it)
+            }
+        }
+    }
+
+    fun setPlayerCacheLimit(size: Int) {
+        viewModelScope.launch {
+            dataStoreManager.setMaxSongCacheSize(size)
+            getPlayerCacheLimit()
+        }
+    }
+
+    @ExperimentalCoilApi
+    fun clearThumbnailCache(platformContext: PlatformContext) {
+        viewModelScope.launch {
+            SingletonImageLoader.get(platformContext).diskCache?.clear()
+            makeToast(getString(Res.string.clear_thumbnail_cache))
+            getThumbCacheSize(platformContext)
+        }
+    }
+
+    private var _equalizerEnabled: MutableStateFlow<Boolean> = MutableStateFlow(false)
+    val equalizerEnabled: StateFlow<Boolean> = _equalizerEnabled
+
+    fun setEqualizerEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            dataStoreManager.setEqualizerEnabled(enabled)
+        }
+    }
+
+    private var _equalizerType: MutableStateFlow<String> = MutableStateFlow(DataStoreManager.EQUALIZER_TYPE_BUILT_IN)
+    val equalizerType: StateFlow<String> = _equalizerType
+
+    fun setEqualizerType(type: String) {
+        viewModelScope.launch {
+            dataStoreManager.setEqualizerType(type)
+        }
+    }
+
+    private var _equalizerBands: MutableStateFlow<List<Float>> = MutableStateFlow(List(EQUALIZER_BAND_COUNT) { 0f })
+    val equalizerBands: StateFlow<List<Float>> = _equalizerBands
+
+    private var _equalizerPreamp: MutableStateFlow<Float> = MutableStateFlow(0f)
+    val equalizerPreamp: StateFlow<Float> = _equalizerPreamp
+
+    /** Raw `"<label>\n<gains>"` of the last imported AutoEq profile; the UI decides if it still applies. */
+    private var _equalizerAutoEqProfile: MutableStateFlow<String> = MutableStateFlow("")
+    val equalizerAutoEqProfile: StateFlow<String> = _equalizerAutoEqProfile
+
+    /**
+     * Guards the collectors below against being started twice.
+     *
+     * Two callers ask for them: [getData], which every visit to the settings screen runs, and the
+     * equalizer block itself, which asks on its own so it keeps working if it is ever hosted
+     * anywhere else. Both land on this same view model, and the collectors live in
+     * [viewModelScope] rather than in a composition — so without this, toggling the switch off and
+     * on left another five behind every time, each re-reading the preference file for a value
+     * three others were already publishing.
+     */
+    private var equalizerCollectorsStarted = false
+
+    fun getEqualizer() {
+        if (equalizerCollectorsStarted) return
+        equalizerCollectorsStarted = true
+        viewModelScope.launch {
+            launch {
+                dataStoreManager.equalizerEnabled.collect {
+                    _equalizerEnabled.emit(it == DataStoreManager.TRUE)
+                }
+            }
+            launch {
+                dataStoreManager.equalizerType.collect { _equalizerType.emit(it) }
+            }
+            launch {
+                dataStoreManager.equalizerBands.collect { stored ->
+                    // Stored blank means flat. Short or malformed input is padded rather than
+                    // rejected, so a curve saved by a future build with more bands still loads.
+                    val parsed = stored.split(",").mapNotNull { it.trim().toFloatOrNull() }
+                    _equalizerBands.emit(
+                        List(EQUALIZER_BAND_COUNT) { parsed.getOrElse(it) { 0f } },
+                    )
+                }
+            }
+            launch {
+                dataStoreManager.equalizerPreamp.collect { _equalizerPreamp.emit(it) }
+            }
+            launch {
+                dataStoreManager.equalizerAutoEqProfile.collect { _equalizerAutoEqProfile.emit(it) }
+            }
+        }
+    }
+
+    /**
+     * Store a whole curve at once.
+     *
+     * The whole list rather than one band at a time because a single drag sweeps across several
+     * bands, and because the per-band version had to read [_equalizerBands] to rebuild the list —
+     * a value that only updates once the write has been through storage, so two edits in quick
+     * succession could reinstate the first band's old gain.
+     */
+    fun setEqualizerBands(bandsDb: List<Float>) {
+        viewModelScope.launch {
+            dataStoreManager.setEqualizerBands(bandsDb)
+        }
+    }
+
+    /**
+     * Move the curve and its preamp together.
+     *
+     * These are two separate preference keys, so the player does briefly see one of them applied
+     * against the other's old value. The preamp goes first deliberately: that way the moment in
+     * between is the new headroom under the old curve — quieter — rather than a freshly boosted
+     * curve still running on the previous preset's headroom, which is the direction that clips.
+     */
+    fun applyEqualizerPreset(
+        bandsDb: List<Float>,
+        preampDb: Float,
+    ) {
+        viewModelScope.launch {
+            dataStoreManager.setEqualizerPreamp(preampDb)
+            dataStoreManager.setEqualizerBands(bandsDb)
+        }
+    }
+
+    fun setEqualizerPreamp(preampDb: Float) {
+        viewModelScope.launch {
+            dataStoreManager.setEqualizerPreamp(preampDb)
+        }
+    }
+
+    fun resetEqualizer() {
+        viewModelScope.launch {
+            dataStoreManager.setEqualizerBands(List(EQUALIZER_BAND_COUNT) { 0f })
+            dataStoreManager.setEqualizerPreamp(0f)
+        }
+    }
+
+    private var _amAnimatedArtwork: MutableStateFlow<Boolean> = MutableStateFlow(false)
+    val amAnimatedArtwork: StateFlow<Boolean> = _amAnimatedArtwork
+
+    fun getAMAnimatedArtwork() {
+        viewModelScope.launch {
+            dataStoreManager.amAnimatedArtwork.collect {
+                _amAnimatedArtwork.emit(it == DataStoreManager.TRUE)
+            }
+        }
+    }
+
+    fun setAMAnimatedArtwork(enabled: Boolean) {
+        viewModelScope.launch {
+            dataStoreManager.setAMAnimatedArtwork(enabled)
+            getAMAnimatedArtwork()
+        }
+    }
+
+    // Lấy giá trị của killServiceOnExit từ DataStore
+    fun getKillServiceOnExit() {
+        viewModelScope.launch {
+            dataStoreManager.killServiceOnExit.collect { killServiceOnExit ->
+                _killServiceOnExit.emit(killServiceOnExit)
+            }
+        }
+    }
+
+    // Lưu giá trị killServiceOnExit vào DataStore
+    fun setKillServiceOnExit(kill: Boolean) {
+        viewModelScope.launch {
+            dataStoreManager.setKillServiceOnExit(kill)
+            getKillServiceOnExit()
+        }
+    }
+
+    private fun getPreferredAudioLanguage() {
+        viewModelScope.launch {
+            dataStoreManager.preferredAudioLanguage.collect { language ->
+                _preferredAudioLanguage.emit(language)
+            }
+        }
+    }
+
+    // Does not re-call the getter, for the same reason as setLyricsOffsetMs: the collector started
+    // in init already publishes every write.
+    fun setPreferredAudioLanguage(language: String) {
+        viewModelScope.launch {
+            dataStoreManager.setPreferredAudioLanguage(language)
+        }
+    }
+
+}
+
+data class SettingsStorageSectionFraction(
+    val otherApp: Float = 0f,
+    val downloadCache: Float = 0f,
+    val playerCache: Float = 0f,
+    val canvasCache: Float = 0f,
+    val thumbCache: Float = 0f,
+    val appDatabase: Float = 0f,
+    val freeSpace: Float = 0f,
+) {
+    fun combine(): Float = otherApp + downloadCache + playerCache + canvasCache + thumbCache + appDatabase + freeSpace
+}
+
+data class SettingAlertState(
+    val title: String,
+    val message: String? = null,
+    val textField: TextFieldData? = null,
+    val selectOne: SelectData? = null,
+    val multipleSelect: SelectData? = null,
+    val confirm: Pair<String, (SettingAlertState) -> Unit>,
+    val dismiss: String,
+) {
+    data class TextFieldData(
+        val label: String,
+        val value: String = "",
+        // User typing string -> (true or false, If false, show error message)
+        val verifyCodeBlock: ((String) -> Pair<Boolean, String?>)? = null,
+    )
+
+    data class SelectData(
+        // Selected / Data
+        val listSelect: List<Pair<Boolean, String>>,
+    ) {
+        fun getSelected(): String = listSelect.firstOrNull { it.first }?.second ?: ""
+
+        fun getListSelected(): List<String> = listSelect.filter { it.first }.map { it.second }
+    }
+}
+
+data class SettingBasicAlertState(
+    val title: String,
+    val message: String? = null,
+    val confirm: Pair<String, () -> Unit>,
+    val dismiss: String,
+)
+
+expect suspend fun calculateDataFraction(cacheRepository: CacheRepository): SettingsStorageSectionFraction?
+
+expect suspend fun restoreNative(
+    commonRepository: CommonRepository,
+    uri: Uri,
+    getData: () -> Unit = {},
+)
+
+/** Reads the whole of a file the user picked: a content Uri on Android, a plain path on Desktop. */
+expect suspend fun readPickedFile(uri: Uri): ByteArray
+
+expect suspend fun backupNative(
+    commonRepository: CommonRepository,
+    uri: Uri,
+    backupDownloaded: Boolean,
+)
+
+expect fun getPackageName(): String
+
+expect fun getFileDir(): String
+
+expect fun changeLanguageNative(code: String)
+
+/** Number of equalizer bands, matching the ISO centres the desktop backend installs. */
+const val EQUALIZER_BAND_COUNT = 10
+
+/** Band centre labels, for display only — the backend owns the actual frequencies. */
+val EQUALIZER_BAND_LABELS = listOf("31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k")

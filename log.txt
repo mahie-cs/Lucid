@@ -1,0 +1,23 @@
+# Changelog - Lucid Project Updates
+
+## Summary of Changes
+
+### 1. Removal of Last.fm Integration
+- Removed the `lastfm` module and all related scrobbling logic (`LastfmScrobbler.kt`).
+- Removed Last.fm settings screen (`LastfmSettingsScreen.kt`), destinations, and icons.
+
+### 2. Removal of Discord Rich Presence
+- Removed the Discord service module (`core/service/discord`).
+- Removed Discord settings screen (`DiscordSettingsScreen.kt`), destinations, and icons.
+
+### 3. Replacement of Limusic Logo & Custom Placeholders with Generic Skeleton Loaders
+- Updated `LucidLoader` (`CenterLoadingBox.kt`) to remove the custom Limusic note logo and replace it with a clean, generic spinning loading arc.
+- Updated artwork loading placeholders (`rememberHolderPainter` in `HolderPainter.kt`) to render a normal theme-aware shimmer skeleton loader background (`LocalAppColors.current.shimmerBackground`) instead of placeholder images containing the Limusic logo.
+
+### 4. New Releases "More" Endpoint Fix
+- Fixed an issue where clicking "More" on the New Releases shelf failed due to YouTube's deprecated `FEmusic_new_releases_albums` endpoint returning 404.
+- Added automatic mapping/redirection in `HomeParser.kt` and `HomeRepositoryImpl.kt` to route `FEmusic_new_releases_albums` to the valid `FEmusic_new_releases` browse endpoint.
+
+### 5. Miscellaneous Fixes
+- Added missing `fillMaxSize` layout import in `WelcomeScreen.kt`.
+- Verified successful compilation and packaging across all targets (`:androidApp:assembleDebug` and `:composeApp:compileAndroidMain`).

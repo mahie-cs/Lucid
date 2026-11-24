@@ -1,0 +1,704 @@
+package com.simohypers.lucid.data.repository
+
+import com.simohypers.lucid.common.MERGING_DATA_TYPE
+import com.simohypers.lucid.data.db.datasource.LocalDataSource
+import com.simohypers.lucid.data.di.LOCAL_PLAYER_HANDLER
+import com.simohypers.lucid.data.extension.getFullDataFromDB
+import com.simohypers.lucid.data.mapping.toListTrack
+import com.simohypers.lucid.data.mapping.toTrack
+import com.simohypers.lucid.data.mapping.toSongItemForDownload
+import com.simohypers.lucid.data.mapping.toWatchEndpoint
+import com.simohypers.lucid.domain.data.entities.QueueEntity
+import com.simohypers.lucid.domain.data.entities.DownloadState
+import com.simohypers.lucid.domain.data.entities.SongEntity
+import com.simohypers.lucid.domain.utils.toSongEntity
+import com.simohypers.lucid.domain.data.entities.SongInfoEntity
+import com.simohypers.lucid.domain.data.model.browse.album.Track
+import com.simohypers.lucid.domain.data.model.download.DownloadCount
+import com.simohypers.lucid.domain.data.model.library.HistoryDay
+import com.simohypers.lucid.domain.data.model.download.DownloadProgress
+import com.simohypers.lucid.domain.data.model.streams.YouTubeWatchEndpoint
+import com.simohypers.lucid.domain.manager.DataStoreManager
+import com.simohypers.lucid.domain.manager.DataStoreManager.Values.TRUE
+import com.simohypers.lucid.domain.mediaservice.handler.DownloadHandler
+import com.simohypers.lucid.domain.mediaservice.handler.MediaPlayerHandler
+import com.simohypers.lucid.domain.repository.SongRepository
+import com.simohypers.lucid.domain.utils.MusicVideoType
+import com.simohypers.lucid.domain.utils.Resource
+import com.simohypers.lucid.domain.utils.isRadioQueueId
+import com.simohypers.lucid.kotlinytmusicscraper.YouTube
+import com.simohypers.lucid.kotlinytmusicscraper.models.SongItem
+import com.simohypers.lucid.kotlinytmusicscraper.models.WatchEndpoint
+import com.simohypers.lucid.kotlinytmusicscraper.models.response.LikeStatus
+import com.simohypers.lucid.kotlinytmusicscraper.pages.NextPage
+import com.simohypers.lucid.kotlinytmusicscraper.parser.getPlaylistContinuation
+import com.simohypers.lucid.logger.Logger
+import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.lastOrNull
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
+import kotlin.concurrent.Volatile
+import kotlinx.datetime.LocalDateTime
+import org.koin.mp.KoinPlatform.getKoin
+import com.simohypers.lucid.kotlinytmusicscraper.pages.PlaylistPage
+import com.simohypers.lucid.common.Config
+import com.simohypers.lucid.domain.repository.PlaylistRepository
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.delay
+import com.simohypers.lucid.domain.data.player.PlaybackRefusals
+import kotlin.time.Clock
+
+private const val TAG = "SongRepositoryImpl"
+private const val LIKED_MUSIC_NEXT = "liked_music_next"
+private const val LIKED_MUSIC_WALKED = "liked_music_walked"
+private const val LIKED_MUSIC_SYNC_EVERY_MS = 30 * 60 * 1000L
+private const val LIKED_MUSIC_BACKOFF_MS = 6 * 60 * 60 * 1000L
+private const val LIKED_MUSIC_PAGE_GAP_MS = 1500L
+private const val LIKED_MUSIC_MAX_PAGES = 50
+
+internal class SongRepositoryImpl(
+    private val dataStoreManager: DataStoreManager,
+    private val localDataSource: LocalDataSource,
+    private val youTube: YouTube,
+    private val librarySync: LibrarySync,
+) : SongRepository {
+    override fun getAllSongs(limit: Int): Flow<List<SongEntity>> =
+        flow {
+            emit(localDataSource.getAllSongs(limit))
+        }.flowOn(Dispatchers.IO)
+
+    override suspend fun setInLibrary(
+        videoId: String,
+        inLibrary: LocalDateTime,
+    ) = withContext(Dispatchers.IO) { localDataSource.setInLibrary(videoId, inLibrary) }
+
+    override fun getSongsByListVideoId(listVideoId: List<String>): Flow<List<SongEntity>> =
+        flow {
+            // SQLite's `WHERE videoId IN (:list)` does NOT preserve the input list order
+            // (it returns rows in table/rowid order). Album tracks, local playlist items,
+            // and queue snapshots all rely on caller-defined order, so we restore it here.
+            val songs = localDataSource.getSongByListVideoIdFull(listVideoId)
+            val byId = songs.associateBy { it.videoId }
+            emit(listVideoId.mapNotNull { byId[it] })
+        }.flowOn(Dispatchers.IO)
+
+    override fun getDownloadedSongs(): Flow<List<SongEntity>?> =
+        flow {
+            emit(
+                getFullDataFromDB { limit, offset ->
+                    localDataSource.getDownloadedSongs(limit, offset)
+                },
+            )
+        }.flowOn(Dispatchers.IO)
+
+    override suspend fun insertSongs(songs: List<SongEntity>) = withContext(Dispatchers.IO) { localDataSource.insertSongs(songs) }
+
+    override suspend fun updateDownloadStates(
+        videoIds: List<String>,
+        downloadState: Int,
+    ) = withContext(Dispatchers.IO) { localDataSource.updateDownloadStates(videoIds, downloadState) }
+
+    override suspend fun reconcileDownloads(
+        active: List<String>,
+        completed: List<String>,
+    ) = withContext(Dispatchers.IO) {
+        localDataSource.resetStaleDownloads(active)
+        localDataSource.updateDownloadStates(completed, DownloadState.STATE_DOWNLOADED)
+    }
+
+    override suspend fun forgetAllDownloads() = withContext(Dispatchers.IO) { localDataSource.forgetAllDownloads() }
+
+    override suspend fun keptVideoIds(): Set<String> = withContext(Dispatchers.IO) { localDataSource.keptVideoIds().toSet() }
+
+    override fun downloadCount(videoIds: List<String>): Flow<DownloadCount> = localDataSource.downloadCount(videoIds)
+
+    override fun downloadedVideoIds(): Flow<Set<String>> = localDataSource.downloadedVideoIds().map { it.toSet() }.flowOn(Dispatchers.IO)
+
+    override fun getDownloadedVideoIdListFromListVideoIdAsFlow(listVideoId: List<String>) =
+        localDataSource.getDownloadedVideoIdListFromListVideoIdAsFlow(listVideoId)
+
+    override fun getLikedSongs(): Flow<List<SongEntity>> =
+        flow {
+            emit(
+                getFullDataFromDB { limit, offset ->
+                    localDataSource.getLikedSongs(limit, offset)
+                },
+            )
+        }.flowOn(Dispatchers.IO)
+
+    /**
+     * The order below is the whole feature.
+     *
+     * A song is orphaned only once nothing points at it, so every cached container has to go first —
+     * sweeping songs on their own found zero to delete, because eleven thousand of them were held
+     * alive by playlists nobody prunes. Artists lead so the two tables keyed on `channelId` can be
+     * measured against what is still followed; podcasts, albums and playlists follow; songs last,
+     * then the satellite rows that were already orphaned before any of this ran.
+     */
+    override suspend fun clearHistoryAndOrphanedSongs(): Int =
+        withContext(Dispatchers.IO) {
+            persistLiveQueueBeforeSweep()
+            localDataSource.deleteAllPlaybackEvents()
+            val artists = localDataSource.deleteUnfollowedArtists()
+            val notifications = localDataSource.deleteNotificationsOfUnfollowedArtists()
+            val artistReleases = localDataSource.deleteFollowedArtistReleasesOfUnfollowedArtists()
+            val artistMotion = localDataSource.deleteOrphanedArtistMotion()
+            val podcasts = localDataSource.deleteUnfavoritedPodcasts()
+            val albums = localDataSource.deleteUnreferencedAlbums()
+            val playlists = localDataSource.deleteUnreferencedPlaylists()
+            val orphans = localDataSource.getOrphanedSongIds()
+            val removed = localDataSource.deleteSongsAndRelatedData(orphans)
+            val satellites = localDataSource.deleteStaleSongSatellites()
+            Logger.d(
+                TAG,
+                "Clear history: removed $removed of ${orphans.size} candidate songs, " +
+                    "$artists artists, $notifications notifications, $artistReleases artist releases, " +
+                    "$artistMotion artist motion rows, " +
+                    "$podcasts podcasts, $albums albums, $playlists playlists, $satellites stale rows",
+            )
+            // Last, and outside every statement above: SQLite refuses VACUUM inside a transaction.
+            // Without it the file stays fragmented and less space comes back than the user expects.
+            // The checkpoint first folds the WAL — which every delete above just filled — back into
+            // the main file, so VACUUM actually has those pages to reclaim.
+            //
+            // Failure here is not failure of the operation: every delete has already committed, so
+            // letting it throw would show an error toast for work that actually succeeded. It only
+            // costs some disk space, and the next run reclaims it.
+            runCatching {
+                localDataSource.checkpoint()
+                localDataSource.vacuum()
+            }.onFailure { Logger.e(TAG, "VACUUM after clearing history failed: ${it.message}") }
+            removed
+        }
+
+    /**
+     * Write whatever is playing right now into the `queue` table, so the sweep cannot delete it.
+     *
+     * The sweep spares songs found in `queue.listTrack`, but that table is only written on pause,
+     * on track change, and on exit — and only when the user has "save recent song and queue" on.
+     * Two ways that loses the current session: with the setting off the table is empty, and even
+     * with it on, the endless queue keeps appending tracks that no save has caught up with yet.
+     * Either way the song playing through the speakers looks orphaned and goes.
+     *
+     * Deliberately ignores that setting: this is not "remember my queue for next launch", it is
+     * "do not delete what is on screen". Writing nothing when the queue is empty matters too —
+     * overwriting a previously saved queue with an empty one would strip the protection instead of
+     * adding it.
+     */
+    private suspend fun persistLiveQueueBeforeSweep() {
+        val liveQueue = mediaPlayerHandler.queueData.value?.data?.listTracks.orEmpty()
+        if (liveQueue.isEmpty()) return
+        Logger.d(TAG, "Clear history: pinning ${liveQueue.size} queued tracks before the sweep")
+        localDataSource.recoverQueue(QueueEntity(listTrack = liveQueue))
+    }
+
+    override fun getCanvasSong(max: Int): Flow<List<SongEntity>> =
+        flow {
+            emit(localDataSource.getCanvasSong(max))
+        }.flowOn(Dispatchers.IO)
+
+    override fun getSongById(id: String): Flow<SongEntity?> =
+        flow {
+            emit(localDataSource.getSong(id))
+        }.flowOn(Dispatchers.IO)
+
+    override fun getSongAsFlow(id: String) = localDataSource.getSongAsFlow(id)
+
+    override fun getLikedSongsByArtist(channelId: String): Flow<List<SongEntity>> = localDataSource.getLikedSongsByArtist(channelId)
+
+    override fun insertSong(songEntity: SongEntity): Flow<Long> = flow<Long> { emit(localDataSource.insertSong(songEntity)) }.flowOn(Dispatchers.IO)
+
+    override fun updateThumbnailsSongEntity(
+        thumbnail: String,
+        videoId: String,
+    ): Flow<Int> = flow { emit(localDataSource.updateThumbnailsSongEntity(thumbnail, videoId)) }.flowOn(Dispatchers.IO)
+
+    override fun updateVideoTypeSongEntity(
+        videoType: String,
+        videoId: String,
+    ): Flow<Int> = flow { emit(localDataSource.updateVideoTypeSongEntity(videoType, videoId)) }.flowOn(Dispatchers.IO)
+
+    override suspend fun updateListenCount(videoId: String) =
+        withContext(Dispatchers.IO) {
+            localDataSource.updateListenCount(videoId)
+        }
+
+    override suspend fun resetTotalPlayTime(videoId: String) =
+        withContext(Dispatchers.IO) {
+            localDataSource.resetTotalPlayTime(videoId)
+        }
+
+    /**
+     * Resolved lazily rather than taken in the constructor: the download handler is implemented in
+     * the platform media modules, and pulling it in at construction time would make this repository
+     * depend on them being built first.
+     */
+    private val downloadHandler: DownloadHandler by lazy { getKoin().get() }
+
+    /**
+     * Lazy for the same reason as [downloadHandler], and here it also breaks a cycle: the handler
+     * already depends on this repository (it calls [recoverQueue] whenever it saves the queue).
+     */
+    private val mediaPlayerHandler: MediaPlayerHandler by lazy { getKoin().get(LOCAL_PLAYER_HANDLER) }
+
+    /**
+     * Bumped by every like or unlike, so a [refreshLikeFromYouTube] already in flight can tell its
+     * answer was asked for before the tap and must not overwrite it.
+     */
+    @Volatile
+    private var likeEpoch = 0
+
+    /**
+     * Note the side effect: liking a song starts its download while Keep library downloaded or
+     * Download songs I like is on.
+     *
+     * Deliberately one-way. It fires only on the way *in*, for a song not liked here before and not
+     * already offline, so a re-like (or Sync pushing old likes) does not queue it twice, and
+     * unliking never removes a file: the user downloaded it, only they should undo that.
+     */
+    override suspend fun updateLikeStatus(
+        videoId: String,
+        likeStatus: Int,
+    ): Boolean =
+        withContext(Dispatchers.Main) {
+            likeEpoch++
+            val song = localDataSource.getSong(videoId)
+            localDataSource.updateLiked(likeStatus, videoId)
+            val key = LibrarySync.song(videoId)
+            if (librarySync.loggedIn()) {
+                val written =
+                    withContext(Dispatchers.IO) {
+                        if (likeStatus == 1) youTube.addToLiked(videoId) else youTube.removeFromLiked(videoId)
+                    }
+                if (written.isFailure) {
+                    Logger.w(TAG, "Like on YouTube failed: ${written.exceptionOrNull()?.message}")
+                    localDataSource.updateLiked(if (song?.liked == true) 1 else 0, videoId)
+                    return@withContext false
+                }
+                // YouTube's ratings exclude each other: the like just cleared any dislike.
+                if (likeStatus == 1 && song?.likeStatus == LikeStatus.DISLIKE.name) localDataSource.updateLikeStatus("LIKE", videoId)
+                librarySync.mark(key, false)
+            } else {
+                librarySync.mark(key, likeStatus == 1)
+            }
+            val downloadLikes = dataStoreManager.keepLibraryDownloaded.first() == TRUE || dataStoreManager.downloadLiked.first() == TRUE
+            if (likeStatus == 1 && song?.liked != true && downloadLikes) {
+                if (song != null && song.downloadState != DownloadState.STATE_DOWNLOADED) {
+                    Logger.d(TAG, "Auto-downloading liked song: $videoId")
+                    downloadHandler.downloadTracks(listOf(song))
+                }
+            }
+            true
+        }
+
+    override suspend fun updateDislike(
+        videoId: String,
+        disliked: Boolean,
+    ): Boolean =
+        withContext(Dispatchers.Main) {
+            likeEpoch++
+            // removelike clears a dislike the same way it clears a like.
+            val written = withContext(Dispatchers.IO) { if (disliked) youTube.dislike(videoId) else youTube.removeFromLiked(videoId) }
+            if (written.isFailure) {
+                Logger.w(TAG, "Dislike on YouTube failed: ${written.exceptionOrNull()?.message}")
+                return@withContext false
+            }
+            localDataSource.updateLikeStatus(if (disliked) LikeStatus.DISLIKE.name else "INDIFFERENT", videoId)
+            if (disliked) {
+                localDataSource.updateLiked(0, videoId)
+                librarySync.mark(LibrarySync.song(videoId), false)
+            }
+            true
+        }
+
+    override fun updateSongInLibrary(
+        inLibrary: LocalDateTime,
+        videoId: String,
+    ): Flow<Int> = flow { emit(localDataSource.updateSongInLibrary(inLibrary, videoId)) }
+
+    override suspend fun updateDurationSeconds(
+        durationSeconds: Int,
+        videoId: String,
+    ) = withContext(Dispatchers.Main) {
+        localDataSource.updateDurationSeconds(
+            durationSeconds,
+            videoId,
+        )
+    }
+
+    override fun getMostPlayedSongs(): Flow<List<SongEntity>> = localDataSource.getMostPlayedSongs()
+
+    override suspend fun updateDownloadState(
+        videoId: String,
+        downloadState: Int,
+    ) = withContext(Dispatchers.IO) {
+        localDataSource.updateDownloadState(
+            downloadState,
+            videoId,
+        )
+    }
+
+    override suspend fun getRecentSong(
+        limit: Int,
+        offset: Int,
+    ) = localDataSource.getRecentSongs(limit, offset)
+
+    override suspend fun getPlayedSongs(limit: Int) = withContext(Dispatchers.IO) { localDataSource.getPlayedSongs(limit) }
+
+    override suspend fun getHistory(): List<HistoryDay>? =
+        withContext(Dispatchers.IO) {
+            youTube
+                .history()
+                .onFailure { Logger.w(TAG, "History failed: ${it.message}") }
+                .getOrNull()
+                ?.map { day -> HistoryDay(day.title, day.rows.mapNotNull { PlaylistPage.fromMusicResponsiveListItemRenderer(it) }.toListTrack()) }
+                ?.filter { it.tracks.isNotEmpty() }
+                ?.also { days -> librarySync.adoptLikes(days.flatMap { it.tracks }) }
+        }
+
+    override suspend fun insertSongInfo(songInfo: SongInfoEntity) =
+        withContext(Dispatchers.IO) {
+            localDataSource.insertSongInfo(songInfo)
+        }
+
+    override suspend fun getSongInfoEntity(videoId: String): Flow<SongInfoEntity?> =
+        flow { emit(localDataSource.getSongInfo(videoId)) }.flowOn(Dispatchers.Main)
+
+    override suspend fun recoverQueue(temp: List<Track>) {
+        val queueEntity = QueueEntity(listTrack = temp)
+        withContext(Dispatchers.IO) { localDataSource.recoverQueue(queueEntity) }
+    }
+
+    override suspend fun removeQueue() {
+        withContext(Dispatchers.IO) { localDataSource.deleteQueue() }
+    }
+
+    override suspend fun getSavedQueue(): Flow<List<QueueEntity>?> =
+        flow {
+            emit(localDataSource.getQueue())
+        }.flowOn(Dispatchers.IO)
+
+    /**
+     * With "Play audio version instead of MV in radio" on, a radio plays each recording as a song:
+     * a video row YouTube also shipped as a song ([SongItem.counterpart], sent to a logged-in
+     * client only) is swapped for that song, and a video with no song version — a fan remix or
+     * mashup — is skipped. [isRadio] gates it because the setting is deliberately radio-scoped: a
+     * playlist or album the user picked themselves must still play exactly what it contains.
+     *
+     * Only entries YouTube *named* as a video count as one. A null `musicVideoType` means the
+     * response never said, which is not a claim of "audio" — those are kept rather than guessed at
+     * (see [MusicVideoType]).
+     *
+     * This used to drop every video, which was harmless in a radio started from a song — measured
+     * logged in (197 entries over four pages), the only videos in one were UGC. A radio started
+     * from a VIDEO is nothing but videos (measured on a UGC seed: 38 OMV, 11 UGC, 1 podcast
+     * episode, no song), so dropping emptied the queue outright. A page that still ends up empty —
+     * no counterparts, as for a client that is not logged in — is kept as it came: a radio that
+     * plays videos beats one that plays nothing.
+     */
+    private suspend fun List<SongItem>.preferAudioWhenRadioAudioOnly(isRadio: Boolean): List<SongItem> {
+        if (!isRadio) return this
+        if (dataStoreManager.radioAudioOnly.first() != TRUE) return this
+        val songs =
+            mapNotNull { item ->
+                if (MusicVideoType.isVideoSong(item.musicVideoType)) {
+                    item.counterpart?.takeIf { MusicVideoType.isAudio(it.musicVideoType) }
+                } else {
+                    item
+                }
+            }.distinctBy { it.id }
+        val swapped = count { MusicVideoType.isVideoSong(it.musicVideoType) && MusicVideoType.isAudio(it.counterpart?.musicVideoType) }
+        Logger.d(TAG, "Radio audio version: $size rows, $swapped swapped to the song, ${songs.size} kept")
+        return songs.ifEmpty { this }
+    }
+
+    override fun getContinueTrack(
+        playlistId: String,
+        continuation: String,
+        fromPlaylist: Boolean,
+    ): Flow<Pair<ArrayList<Track>?, String?>> =
+        flow {
+            runCatching {
+                var newContinuation: String? = null
+                Logger.d(TAG, "getContinueTrack -> playlistId: $playlistId")
+                Logger.d(TAG, "getContinueTrack -> continuation: $continuation")
+                if (!fromPlaylist) {
+                    youTube
+                        .next(
+                            if (playlistId.startsWith("RRDAMVM")) {
+                                WatchEndpoint(videoId = playlistId.removePrefix("RRDAMVM"))
+                            } else {
+                                WatchEndpoint(playlistId = playlistId)
+                            },
+                            continuation = continuation,
+                        ).onSuccess { next ->
+                            val data: ArrayList<SongItem> = arrayListOf()
+                            // Only this branch can be a radio — the `else` below continues a real
+                            // playlist. `RRDAMVM…` counts as one too: it is YouTube's other
+                            // spelling for the radio of a single video, which `isRadioQueueId`
+                            // deliberately does not match because it never appears as a queue's
+                            // own playlistId.
+                            val isRadio =
+                                playlistId.startsWith("RRDAMVM") || playlistId.isRadioQueueId()
+                            data.addAll(next.items.preferAudioWhenRadioAudioOnly(isRadio))
+                            newContinuation = next.continuation
+                            emit(Pair(data.toListTrack(), newContinuation))
+                        }.onFailure { exception ->
+                            Logger.w(TAG, "getContinueTrack: $exception")
+                            emit(Pair(null, null))
+                        }
+                } else {
+                    youTube
+                        .customQuery(
+                            browseId = null,
+                            continuation = continuation,
+                            setLogin = true,
+                        ).onSuccess { values ->
+                            Logger.d(TAG, "getPlaylistData -> continue: $continuation")
+                            Logger.d(TAG, "getPlaylistData -> values: ${values.onResponseReceivedActions}")
+                            val dataMore: List<SongItem> =
+                                values.onResponseReceivedActions
+                                    ?.firstOrNull()
+                                    ?.appendContinuationItemsAction
+                                    ?.continuationItems
+                                    ?.apply {
+                                        Logger.d(TAG, "getContinueTrack -> dataMore: ${this.size}")
+                                    }?.mapNotNull {
+                                        NextPage.fromMusicResponsiveListItemRenderer(
+                                            it.musicResponsiveListItemRenderer ?: return@mapNotNull null,
+                                        )
+                                    } ?: emptyList()
+                            newContinuation =
+                                values.getPlaylistContinuation()
+                            val tracks = dataMore.toListTrack()
+                            librarySync.adoptLikes(tracks)
+                            emit(Pair<ArrayList<Track>?, String?>(tracks, newContinuation))
+                        }.onFailure {
+                            if (it is CancellationException) throw it
+                            Logger.e(TAG, "getContinueTrack -> Error: ${it.message}")
+                            emit(Pair(null, null))
+                        }
+                }
+            }
+        }.flowOn(Dispatchers.IO)
+
+    override fun getSongInfo(videoId: String): Flow<SongInfoEntity?> =
+        flow {
+            runCatching {
+                val id =
+                    if (videoId.contains(MERGING_DATA_TYPE.VIDEO)) {
+                        videoId.removePrefix(MERGING_DATA_TYPE.VIDEO)
+                    } else {
+                        videoId
+                    }
+                // The player asks before a queue is restored, with no track yet: nothing to look up.
+                if (id.isBlank()) return@flow emit(null)
+                youTube
+                    .getSongInfo(id)
+                    .onSuccess { songInfo ->
+                        val song =
+                            SongInfoEntity(
+                                videoId = songInfo.videoId,
+                                author = songInfo.author,
+                                authorId = songInfo.authorId,
+                                authorThumbnail = songInfo.authorThumbnail,
+                                description = songInfo.description,
+                                uploadDate = songInfo.uploadDate,
+                                subscribers = songInfo.subscribers,
+                                viewCount = songInfo.viewCount,
+                                like = songInfo.like,
+                                dislike = songInfo.dislike,
+                            )
+                        emit(song)
+                        insertSongInfo(
+                            song,
+                        )
+                    }.onFailure {
+                        Logger.w(TAG, "getSongInfo: $it")
+                        emit(getSongInfoEntity(videoId).lastOrNull())
+                    }
+            }
+        }.flowOn(Dispatchers.IO)
+
+    /**
+     * A like still waiting for Sync wins over YouTube's "not liked": the account hasn't heard of it
+     * yet. Failures write nothing, and neither does an answer a tap overtook.
+     */
+    override suspend fun getLibrarySongs(continuation: String?): Pair<List<Track>, String?>? =
+        withContext(Dispatchers.IO) {
+            val page = youTube.libraryPage(LIBRARY_SONGS, continuation).getOrNull() ?: return@withContext null
+            // The shelf opens with a "Shuffle all" row, which has no video and drops out here.
+            val songs = page.rows.mapNotNull { PlaylistPage.fromMusicResponsiveListItemRenderer(it) }.toListTrack()
+            librarySync.adoptLikes(songs)
+            // A page with nothing on it ends the list even if it carries a token.
+            songs to page.continuation?.takeIf { songs.isNotEmpty() }
+        }
+
+    override suspend fun refreshLikeFromYouTube(videoId: String): Track? {
+        if (!librarySync.loggedIn()) return null
+        val epoch = likeEpoch
+        val info = withContext(Dispatchers.IO) { youTube.getWatchInfo(videoId) }.getOrNull() ?: return null
+        val row = info.row?.toTrack()
+        // The same answer fills a song stored without links, at no extra request.
+        if (row != null && localDataSource.getSong(videoId)?.missesLinks() == true) {
+            linkLookups.add(videoId)
+            localDataSource.insertSong(row.toSongEntity())
+        }
+        val status = info.likeStatus ?: return row
+        // A like still on its way up wins over what YouTube says now.
+        if (epoch != likeEpoch || librarySync.isUnsynced(LibrarySync.song(videoId))) return row
+        val liked = status == LikeStatus.LIKE
+        val song = localDataSource.getSong(videoId) ?: return row
+        if (song.liked != liked) localDataSource.updateLiked(if (liked) 1 else 0, videoId)
+        if ((song.likeStatus == LikeStatus.DISLIKE.name) != (status == LikeStatus.DISLIKE)) localDataSource.updateLikeStatus(status.name, videoId)
+        return row
+    }
+
+    private val likedMusicSync = Mutex()
+
+    /**
+     * Likes made on another device (desktop, YouTube Music's own apps) reach the phone here. Liked
+     * Music comes back newest first, so a like made elsewhere is near the top: pages are read until
+     * one holds a song the phone already had as liked, usually the first. The first sync for an
+     * account reads the whole list, stores what the phone lacks, and unlikes what is no longer in
+     * it. After that, unlikes made elsewhere come in through page rows and the play check.
+     *
+     * Kept gentle for big libraries: pages 1.5 s apart, like someone scrolling; nothing while a bot
+     * check or a 429 has playback blocked; the next sync's time is written before the fetch, and a
+     * failed page pushes it 6 hours out, so a list that keeps failing is not retried every 30 min.
+     * ponytail: capped at 50 pages (5000 likes), desktop's cap. Past it the list isn't whole, so
+     * nothing is unliked, but it still counts as walked, or every sync would read 50 pages again.
+     */
+    override suspend fun syncLikedMusic() {
+        if (!librarySync.loggedIn() || PlaybackRefusals.blocked.value != null || !likedMusicSync.tryLock()) return
+        try {
+            val account = "${dataStoreManager.authUser.first()}|${dataStoreManager.pageId.first()}|${dataStoreManager.getString("AccountName").first()}"
+            val now = Clock.System.now().toEpochMilliseconds()
+            val (nextAt, syncedFor) = dataStoreManager.getString(LIKED_MUSIC_NEXT).first()?.split(' ', limit = 2).orEmpty() + listOf("", "")
+            if (syncedFor == account && now < (nextAt.toLongOrNull() ?: 0)) return
+            suspend fun nextSyncIn(ms: Long) = dataStoreManager.putString(LIKED_MUSIC_NEXT, "${now + ms} $account")
+            nextSyncIn(LIKED_MUSIC_SYNC_EVERY_MS)
+            val walked = dataStoreManager.getString(LIKED_MUSIC_WALKED).first() == account
+            val likedBefore = withContext(Dispatchers.IO) { localDataSource.likedSongIds() }.toSet()
+            val seen = mutableSetOf<String>()
+            // The page fetches already bring stored songs in line (LibrarySync.adoptLikes).
+            var page =
+                playlistRepository
+                    .getPlaylistData("LM", "", null, false)
+                    .first()
+                    .data
+                    ?.let { it.first.tracks to it.second }
+            repeat(LIKED_MUSIC_MAX_PAGES) {
+                val (tracks, next) = page ?: return nextSyncIn(LIKED_MUSIC_BACKOFF_MS)
+                withContext(Dispatchers.IO) {
+                    localDataSource.insertSongs(tracks.map { it.toSongEntity().copy(inLibrary = Config.REMOVED_SONG_DATE_TIME) })
+                }
+                seen += tracks.map { it.videoId }
+                if (walked && tracks.any { it.videoId in likedBefore }) return
+                if (next == null) {
+                    librarySync.adopt(emptyList(), (likedBefore - seen).toList())
+                    dataStoreManager.putString(LIKED_MUSIC_WALKED, account)
+                    Logger.d(TAG, "Liked Music walked: ${seen.size} likes")
+                    return
+                }
+                delay(LIKED_MUSIC_PAGE_GAP_MS)
+                page = getContinueTrack("LM", next, fromPlaylist = true).first().let { (rows, token) -> rows?.let { it to token } }
+            }
+            dataStoreManager.putString(LIKED_MUSIC_WALKED, account)
+        } finally {
+            likedMusicSync.unlock()
+        }
+    }
+
+    private val playlistRepository: PlaylistRepository by lazy { getKoin().get() }
+
+    // Songs this run already asked about, so a video (which has no album) is asked once, not on
+    // every menu. ponytail: unsynchronised set; a race costs one duplicate request at most.
+    private val linkLookups = mutableSetOf<String>()
+
+    private fun SongEntity.missesLinks() = artistId.orEmpty().none { it.isNotBlank() } || albumId.isNullOrBlank()
+
+    override suspend fun fillMissingLinks(videoId: String) {
+        val song = localDataSource.getSong(videoId) ?: return
+        if (!song.missesLinks() || !linkLookups.add(videoId)) return
+        val row = withContext(Dispatchers.IO) { youTube.getWatchInfo(videoId) }.getOrNull()?.row ?: return
+        // An existing row takes only the repairs: links where it had none, an album where it had none.
+        localDataSource.insertSong(row.toTrack().toSongEntity())
+    }
+
+    override fun downloadToFile(
+        track: Track,
+        path: String,
+        videoId: String,
+        isVideo: Boolean,
+    ): Flow<DownloadProgress> =
+        youTube
+            .download(
+                track.toSongItemForDownload(),
+                path,
+                videoId,
+                isVideo,
+            ).map {
+                DownloadProgress(
+                    audioDownloadProgress = it.audioDownloadProgress,
+                    videoDownloadProgress = it.videoDownloadProgress,
+                    downloadSpeed = it.downloadSpeed,
+                    errorMessage = it.errorMessage,
+                    isMerging = it.isMerging,
+                    isError = it.isError,
+                    isDone = it.isDone,
+                )
+            }
+
+    override fun getRelatedData(videoId: String): Flow<Resource<Pair<List<Track>, String?>>> =
+        flow {
+            runCatching {
+                youTube
+                    .next(WatchEndpoint(videoId = videoId))
+                    .onSuccess { next ->
+                        val data: ArrayList<SongItem> = arrayListOf()
+                        // Always a radio, though not directly: `next(videoId)` alone answers with
+                        // just two rows — the song itself and an `automixPreviewVideoRenderer`
+                        // pointing at its `RDAMVM…` radio. `YouTube.next` follows that pointer and
+                        // splices the radio in, so everything here past the first row is radio
+                        // content, and this is what extends the queue once it runs dry.
+                        data.addAll(
+                            next.items
+                                .filter { it.id != videoId }
+                                .toSet()
+                                .toList()
+                                .preferAudioWhenRadioAudioOnly(isRadio = true),
+                        )
+                        val nextContinuation = next.continuation
+                        emit(Resource.Success<Pair<List<Track>, String?>>(Pair(data.toListTrack().toList(), nextContinuation)))
+                    }.onFailure { exception ->
+                        Logger.w(TAG, "getRelatedData: $exception")
+                        emit(Resource.Error<Pair<List<Track>, String?>>(exception.message.toString()))
+                    }
+            }
+        }.flowOn(Dispatchers.IO)
+
+    override fun getRadioFromEndpoint(endpoint: YouTubeWatchEndpoint): Flow<Resource<Pair<List<Track>, String?>>> =
+        flow {
+            runCatching {
+                youTube
+                    .next(endpoint.toWatchEndpoint())
+                    .onSuccess { next ->
+                        val items =
+                            next.items.preferAudioWhenRadioAudioOnly(
+                                isRadio = endpoint.playlistId?.isRadioQueueId() == true,
+                            )
+                        emit(Resource.Success(Pair(items.toListTrack(), next.continuation)))
+                    }.onFailure {
+                        Logger.w(TAG, "getRadioFromEndpoint: $it")
+                        emit(Resource.Error(it.message ?: "Error"))
+                    }
+            }
+        }
+}

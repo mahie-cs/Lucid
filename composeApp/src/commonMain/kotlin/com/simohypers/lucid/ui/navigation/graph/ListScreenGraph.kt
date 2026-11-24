@@ -1,0 +1,91 @@
+package com.simohypers.lucid.ui.navigation.graph
+
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.navigation.NavController
+import androidx.navigation.NavGraphBuilder
+import androidx.navigation.compose.composable
+import androidx.navigation.toRoute
+import com.simohypers.lucid.ui.navigation.destination.list.AlbumDestination
+import com.simohypers.lucid.ui.navigation.destination.list.ArtistDestination
+import com.simohypers.lucid.ui.navigation.destination.list.BrowseDestination
+import com.simohypers.lucid.ui.navigation.destination.list.LocalPlaylistDestination
+import com.simohypers.lucid.ui.navigation.destination.list.MoreAlbumsDestination
+import com.simohypers.lucid.ui.navigation.destination.list.PlaylistDestination
+import com.simohypers.lucid.ui.navigation.destination.list.PodcastDestination
+import com.simohypers.lucid.ui.screen.library.LocalPlaylistScreen
+import com.simohypers.lucid.ui.screen.other.AlbumScreen
+import com.simohypers.lucid.ui.screen.other.ArtistScreen
+import com.simohypers.lucid.ui.screen.other.BrowseScreen
+import com.simohypers.lucid.ui.screen.other.MoreAlbumsScreen
+import com.simohypers.lucid.ui.screen.other.PlaylistScreen
+import com.simohypers.lucid.ui.screen.other.PodcastScreen
+
+@ExperimentalMaterial3Api
+@ExperimentalFoundationApi
+fun NavGraphBuilder.listScreenGraph(
+    innerPadding: PaddingValues,
+    navController: NavController,
+) {
+    composable<AlbumDestination> { entry ->
+        val data = entry.toRoute<AlbumDestination>()
+        AlbumScreen(
+            browseId = data.browseId,
+            navController = navController,
+            innerPadding = innerPadding,
+        )
+    }
+    composable<ArtistDestination> { entry ->
+        val data = entry.toRoute<ArtistDestination>()
+        ArtistScreen(
+            channelId = data.channelId,
+            navController = navController,
+            innerPadding = innerPadding,
+        )
+    }
+    composable<LocalPlaylistDestination> { entry ->
+        val data = entry.toRoute<LocalPlaylistDestination>()
+        LocalPlaylistScreen(
+            id = data.id,
+            navController = navController,
+            innerPadding = innerPadding,
+        )
+    }
+    composable<MoreAlbumsDestination> { entry ->
+        val data = entry.toRoute<MoreAlbumsDestination>()
+        MoreAlbumsScreen(
+            navController = navController,
+            id = data.id,
+            type = data.type,
+            artist = data.artist,
+            artwork = data.artwork,
+        )
+    }
+    composable<BrowseDestination> { entry ->
+        val data = entry.toRoute<BrowseDestination>()
+        BrowseScreen(
+            navController = navController,
+            browseId = data.browseId,
+            params = data.params,
+            title = data.title,
+            kicker = data.kicker,
+        )
+    }
+    composable<PlaylistDestination> { entry ->
+        val data = entry.toRoute<PlaylistDestination>()
+        PlaylistScreen(
+            playlistId = data.playlistId,
+            isYourYouTubePlaylist = data.isYourYouTubePlaylist,
+            navController = navController,
+            innerPadding = innerPadding,
+        )
+    }
+    composable<PodcastDestination> { entry ->
+        val data = entry.toRoute<PodcastDestination>()
+        PodcastScreen(
+            podcastId = data.podcastId,
+            navController = navController,
+        )
+    }
+}

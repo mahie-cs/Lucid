@@ -1,0 +1,407 @@
+/*
+ * The transport half of Listen Together, talking to Lucid's sync server (`crates/sync-server` in
+ * the Lucid repo) so Android and desktop share rooms. Originally written against Metrolist's
+ * server (GPL-3.0, the same licence as this project).
+ */
+package com.simohypers.lucid.listentogether
+
+import com.simohypers.lucid.common.Connectivity
+import com.simohypers.lucid.ktorext.getEngine
+import com.simohypers.lucid.logger.Logger
+import io.ktor.client.HttpClient
+import io.ktor.client.plugins.UserAgent
+import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
+import io.ktor.client.plugins.websocket.WebSockets
+import io.ktor.client.plugins.websocket.webSocketSession
+import io.ktor.websocket.Frame
+import io.ktor.websocket.close
+import io.ktor.websocket.readText
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.CoroutineContext
+import kotlin.time.Clock
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.TimeSource
+
+private const val TAG = "ListenTogetherClient"
+
+/**
+ * What the socket reports upward.
+ *
+ * Everything above this class reacts to these and never to frames, which is what lets the state
+ * machine in the next layer stay platform-free and testable without a socket.
+ */
+sealed interface ListenTogetherEvent {
+    /**
+     * The handshake completed and the connection is usable.
+     *
+     * [resumed] means a `reconnect` was sent with a stored session token — the room may still be
+     * the one we were in. It is NOT a promise: the server answers `reconnected` on success and
+     * `error` when the token has expired, and only that answer settles it.
+     */
+    data class Connected(
+        val serverVersion: String,
+        val resumed: Boolean,
+    ) : ListenTogetherEvent
+
+    /** One decoded protocol message. [payload] is null for types this client does not model. */
+    data class Message(
+        val type: String,
+        val payload: Any?,
+    ) : ListenTogetherEvent
+
+    /**
+     * The socket is down. [willRetry] false means this client has given up and the user has to
+     * rejoin by hand — the retry budget is spent, or the server refused this client outright.
+     */
+    data class Disconnected(
+        val reason: String?,
+        val willRetry: Boolean,
+    ) : ListenTogetherEvent
+}
+
+/**
+ * Owns one WebSocket to a Listen Together server: the frame loop, the keepalive ping, and
+ * reconnection with a stored session token.
+ *
+ * It deliberately holds no room state — that belongs to the layer above. The one piece of protocol
+ * knowledge it does keep is the session token, because reconnection has to be transparent: it is
+ * read out of `room_created` / `join_approved` as those pass through, and replayed on the next
+ * connection.
+ */
+class ListenTogetherClient(
+    /** Application identity for the HTTP upgrade request, separate from protocol capabilities. */
+    userAgent: String,
+    /**
+     * Read on every connection attempt rather than captured once, so changing the server in
+     * settings takes effect on the next connect instead of needing the screen to be recreated.
+     */
+    private val serverUrl: () -> String = { DEFAULT_SERVER_URL },
+    /**
+     * MUST be monotonic and keep counting in deep sleep (Android's `SystemClock.elapsedRealtime`).
+     * [ServerClock] stands for the wall clock, which the player views extrapolate against: a clock
+     * that stops while the phone sleeps runs every later position ahead by the time slept.
+     */
+    private val elapsedRealtime: () -> Long,
+    dispatcher: CoroutineContext = Dispatchers.Default,
+) : CoroutineScope {
+    override val coroutineContext: CoroutineContext = SupervisorJob() + dispatcher
+
+    private val client: HttpClient =
+        HttpClient(getEngine()) {
+            install(UserAgent) { agent = userAgent }
+            install(WebSockets)
+        }
+
+    private val serverClock = ServerClock(elapsedRealtime)
+
+    // SUSPEND rather than a dropping overflow policy, and a buffer far larger than any burst the
+    // server can produce: losing one protocol frame is a silent desync, which is strictly worse
+    // than briefly slowing the reader. The server's own send buffer is 256.
+    private val _events = MutableSharedFlow<ListenTogetherEvent>(extraBufferCapacity = 256)
+    val events: SharedFlow<ListenTogetherEvent> = _events.asSharedFlow()
+
+    private val codec = MessageCodec()
+    private var session: DefaultClientWebSocketSession? = null
+    private var connectionJob: Job? = null
+
+    private var sessionToken: String? = null
+    private var reconnectDelay = INITIAL_RECONNECT_DELAY
+    private var reconnectAttempts = 0
+    /** Set when the server tells us retrying cannot help — see [MessageTypes.ERROR] handling. */
+    private var fatal = false
+
+    /** True while the socket is open. */
+    val isConnected: Boolean
+        get() = session?.isActive == true
+
+    /** Server wall time now, or null before the first connection. */
+    fun serverNow(): Long? = serverClock.now()
+
+    /** See [ServerClock.positionAt]. Falls back to [position] whenever the clock cannot help. */
+    fun positionAt(
+        position: Long,
+        effectiveAtServerTime: Long?,
+        isPlaying: Boolean,
+    ): Long = serverClock.positionAt(position, effectiveAtServerTime, isPlaying)
+
+    /**
+     * Opens the connection, or does nothing if one is already open or opening.
+     *
+     * Reconnection is automatic from here on; callers do not call this again after a drop.
+     */
+    fun connect() {
+        // A deliberate start by the user, so the attempt budget begins again. The retry path
+        // deliberately calls [startConnection] instead of this: routing a retry through here would
+        // reset the counter every time and [MAX_RECONNECT_ATTEMPTS] would never be reached — the
+        // limit would look implemented and quietly never fire.
+        reconnectAttempts = 0
+        reconnectDelay = INITIAL_RECONNECT_DELAY
+        fatal = false
+        startConnection()
+    }
+
+    private fun startConnection() {
+        if (connectionJob?.isActive == true) {
+            Logger.i(TAG, "Connect ignored — a connection is already active")
+            return
+        }
+        connectionJob =
+            launch {
+                try {
+                    openAndRun()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Logger.e(TAG, "Connection error: ${e.stackTraceToString()}")
+                }
+                // Reached on every close, clean or not — openAndRun returns when the reader stops.
+                scheduleReconnect()
+            }
+    }
+
+    /**
+     * Sends one message. Returns false when there is no live socket, which the caller must treat
+     * as "not sent" rather than retrying blindly: the reconnect path replays nothing.
+     */
+    suspend fun send(
+        msgType: String,
+        payload: Any? = null,
+    ): Boolean {
+        val live = session ?: return false
+        if (!live.isActive) return false
+        // Nothing to send for a message the server has no counterpart for; that is not a failure.
+        val frame = codec.encode(msgType, payload) ?: return true
+        return runCatching {
+            live.send(Frame.Text(frame))
+            true
+        }.getOrElse { e ->
+            Logger.w(TAG, "Send failed for $msgType: ${e.message}")
+            false
+        }
+    }
+
+    /** Leaves for good: stops retrying, forgets the session token, closes the socket. */
+    fun disconnect() {
+        Logger.i(TAG, "Disconnecting by request")
+        sessionToken = null
+        reconnectAttempts = 0
+        connectionJob?.cancel()
+        connectionJob = null
+        launch {
+            runCatching { session?.close() }
+            session = null
+        }
+    }
+
+    /** Releases the HTTP client too. The instance is unusable afterwards. */
+    fun release() {
+        disconnect()
+        runCatching { client.close() }
+        cancel()
+    }
+
+    private suspend fun openAndRun() {
+        val url = serverUrl().ifBlank { DEFAULT_SERVER_URL }
+        Logger.i(TAG, "Connecting to $url")
+        val live = client.webSocketSession(url)
+        session = live
+        // Lucid's server stamps times with its wall clock and its pong carries none, so the
+        // device's own wall clock stands in for it, as on desktop.
+        serverClock.assumeServerTime(Clock.System.now().toEpochMilliseconds())
+
+        try {
+            coroutineScope {
+                val reader = launch { readFrames(live) }
+
+                val token = sessionToken
+                if (token != null) {
+                    Logger.i(TAG, "Resuming with stored session token")
+                    send(MessageTypes.RECONNECT, ReconnectPayload(sessionToken = token))
+                }
+
+                // An open socket is what "connected" means here; there is no handshake.
+                reconnectDelay = INITIAL_RECONNECT_DELAY
+                reconnectAttempts = 0
+                _events.emit(ListenTogetherEvent.Connected(serverVersion = "", resumed = token != null))
+
+                val pinger = launch { pingLoop() }
+                val watchdog = launch { watch(live) }
+                reader.join()
+                pinger.cancel()
+                watchdog.cancel()
+            }
+        } finally {
+            session = null
+            // NonCancellable because this runs on the disconnect() path too, where the job has
+            // already been cancelled — and close() is itself a suspend call, so without this it
+            // would abort immediately and the close frame would never be sent.
+            withContext(NonCancellable) { runCatching { live.close() } }
+        }
+    }
+
+    private suspend fun readFrames(live: DefaultClientWebSocketSession) {
+        lastHeard = TimeSource.Monotonic.markNow()
+        for (frame in live.incoming) {
+            lastHeard = TimeSource.Monotonic.markNow()
+            // Lucid's server writes text frames only.
+            if (frame !is Frame.Text) continue
+            val text = frame.readText()
+            val decoded = codec.decode(text)
+            if (decoded == null) {
+                Logger.w(TAG, "Undecodable frame dropped (${text.length} chars)")
+                continue
+            }
+            handleMessage(decoded.first, decoded.second)
+        }
+        Logger.i(TAG, "Read loop ended; socket closed")
+    }
+
+    private suspend fun handleMessage(
+        type: String,
+        payload: Any?,
+    ) {
+        when (type) {
+            // A keepalive answer and nothing else.
+            MessageTypes.PONG -> return
+
+            // The token is what makes a drop survivable, so it is captured in passing rather than
+            // asked of the layer above — which may not have been listening yet.
+            MessageTypes.ROOM_CREATED -> (payload as? RoomCreatedPayload)?.let { sessionToken = it.sessionToken }
+            MessageTypes.JOIN_APPROVED -> (payload as? JoinApprovedPayload)?.let { sessionToken = it.sessionToken }
+
+            MessageTypes.ERROR -> {
+                val error = payload as? ErrorPayload
+                Logger.w(TAG, "Server error: ${error?.code} ${error?.message}")
+                // `error?.code in set` would not compile — Set<String>.contains takes a non-null
+                // String, and a null code is not a rejection anyway.
+                if (error != null && error.code in NON_RECOVERABLE_ERROR_CODES) {
+                    Logger.e(TAG, "Server rejected this client (${error.code}) — not retrying")
+                    fatal = true
+                }
+                // A token the server no longer knows cannot resume anything.
+                if (error?.code == "session_expired") sessionToken = null
+            }
+
+            // A room we can no longer return to: the token is spent either way.
+            MessageTypes.KICKED -> sessionToken = null
+        }
+        _events.emit(ListenTogetherEvent.Message(type, payload))
+    }
+
+    /** Keeps the socket alive: the server drops a connection that says nothing for 90s. */
+    private suspend fun pingLoop() {
+        while (send(MessageTypes.PING)) delay(PING_INTERVAL)
+    }
+
+    /** When the last frame came in. The server answers every ping, so silence means a dead socket. */
+    private var lastHeard = TimeSource.Monotonic.markNow()
+
+    /**
+     * Ends a socket that died without closing (a network switch, a Wi-Fi left behind in another
+     * room), which would otherwise look connected until TCP gives up minutes later. Ending it is
+     * what starts the reconnect. Like desktop: a minute of silence. After a network change the
+     * socket is likely on the old network, so it gets ten seconds to answer a ping.
+     */
+    private suspend fun watch(live: DefaultClientWebSocketSession): Unit =
+        coroutineScope {
+            launch {
+                Connectivity.reconnects().collect {
+                    val asked = TimeSource.Monotonic.markNow()
+                    send(MessageTypes.PING)
+                    delay(NETWORK_CHANGE_LIMIT)
+                    if (lastHeard < asked) {
+                        Logger.w(TAG, "No answer on the old network after a network change; reconnecting")
+                        live.cancel()
+                    }
+                }
+            }
+            while (lastHeard.elapsedNow() < SILENCE_LIMIT) delay(1.seconds)
+            Logger.w(TAG, "Server went silent; reconnecting")
+            live.cancel()
+        }
+
+    private suspend fun scheduleReconnect() {
+        if (fatal) {
+            _events.emit(ListenTogetherEvent.Disconnected("Server rejected this client", willRetry = false))
+            return
+        }
+
+        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+            Logger.w(TAG, "Gave up after $MAX_RECONNECT_ATTEMPTS reconnection attempts")
+            // The token is dropped with the attempts: a later connect() is a fresh join, not a
+            // resume, and replaying a token the server may already have expired would be answered
+            // with an error rather than a room.
+            sessionToken = null
+            _events.emit(
+                ListenTogetherEvent.Disconnected(
+                    reason = "Could not reconnect after $MAX_RECONNECT_ATTEMPTS attempts",
+                    willRetry = false,
+                ),
+            )
+            return
+        }
+
+        _events.emit(ListenTogetherEvent.Disconnected("Connection lost", willRetry = true))
+        if (!Connectivity.state.value.hasNetwork) {
+            // Offline every try fails: wait for a network without spending any, and go the moment
+            // one is back. The server keeps the seat two minutes, so a short dead zone resumes the room.
+            Logger.i(TAG, "Offline; reconnecting when a network is back")
+            Connectivity.state.first { it.hasNetwork }
+        } else {
+            reconnectAttempts++
+            Logger.i(TAG, "Reconnecting in $reconnectDelay (attempt $reconnectAttempts of $MAX_RECONNECT_ATTEMPTS)")
+            // A network coming back cuts the wait short.
+            withTimeoutOrNull(reconnectDelay) { Connectivity.reconnects().first() }
+            reconnectDelay = (reconnectDelay * 2).coerceAtMost(MAX_RECONNECT_DELAY)
+        }
+        connectionJob = null
+        startConnection()
+    }
+
+    companion object {
+        /** Lucid desktop's default server, so Android and desktop land in the same rooms. */
+        const val DEFAULT_SERVER_URL = "wss://sync.limusic.app/ws"
+
+        /** Desktop pings every 25s; the server's idle limit is 90s. */
+        private val PING_INTERVAL = 25.seconds
+
+        private val INITIAL_RECONNECT_DELAY: Duration = 1.seconds
+        private val MAX_RECONNECT_DELAY: Duration = 32.seconds
+
+        /** Desktop's: this long without a frame and the socket is taken for dead. */
+        private val SILENCE_LIMIT: Duration = 60.seconds
+
+        /** How long a socket gets to answer a ping after the phone changed networks. */
+        private val NETWORK_CHANGE_LIMIT: Duration = 10.seconds
+
+        /**
+         * How many times a dropped connection is retried before the user is told, in so many words,
+         * that it failed. Desktop's numbers: the delay doubles from 1s up to 32s, so fifteen attempts
+         * span about six minutes of genuinely bad network. Attempts while offline are not counted:
+         * the client just waits for a network.
+         *
+         * Counted attempts, not elapsed time: the budget refills when a socket opens.
+         */
+        private const val MAX_RECONNECT_ATTEMPTS = 15
+
+        /** Errors where reconnecting repeats the same rejection. */
+        private val NON_RECOVERABLE_ERROR_CODES = setOf("server_full")
+    }
+}

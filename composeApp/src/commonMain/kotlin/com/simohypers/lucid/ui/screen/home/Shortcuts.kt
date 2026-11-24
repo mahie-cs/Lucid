@@ -1,0 +1,612 @@
+package com.simohypers.lucid.ui.screen.home
+
+import com.simohypers.lucid.ui.navigation.destination.list.ArtistDestination
+import com.simohypers.lucid.ui.component.ArtistMenu
+import com.simohypers.lucid.ui.theme.rounded
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.navigation.NavController
+import coil3.compose.AsyncImage
+import com.simohypers.lucid.domain.data.entities.AlbumEntity
+import com.simohypers.lucid.domain.data.model.searchResult.albums.AlbumsResult
+import com.simohypers.lucid.domain.data.entities.LocalPlaylistEntity
+import com.simohypers.lucid.domain.data.entities.PlaylistEntity
+import com.simohypers.lucid.domain.data.entities.PodcastsEntity
+import com.simohypers.lucid.domain.data.model.browse.playlist.Author
+import com.simohypers.lucid.domain.data.model.browse.playlist.PlaylistState
+import com.simohypers.lucid.domain.data.model.library.LibraryOverview
+import com.simohypers.lucid.domain.data.model.searchResult.playlists.PlaylistsResult
+import com.simohypers.lucid.domain.data.type.PlaylistType
+import com.simohypers.lucid.domain.data.type.HomeContentType
+import com.simohypers.lucid.domain.data.model.home.Content
+import com.simohypers.lucid.domain.data.model.browse.artist.ResultAlbum
+import com.simohypers.lucid.domain.data.model.browse.artist.ResultPlaylist
+import com.simohypers.lucid.domain.data.model.browse.artist.ResultSingle
+import com.simohypers.lucid.domain.utils.toListName
+import com.simohypers.lucid.ui.component.pageDestination
+import com.simohypers.lucid.viewModel.SharedViewModel
+import org.koin.compose.koinInject
+import com.simohypers.lucid.domain.utils.connectArtists
+import com.simohypers.lucid.domain.utils.isRadioPlaylistId
+import com.simohypers.lucid.ui.component.AlbumMenu
+import com.simohypers.lucid.ui.component.LocalPlaylistMenu
+import com.simohypers.lucid.ui.component.PlaylistMenu
+import com.simohypers.lucid.ui.component.SettingSheet
+import com.simohypers.lucid.ui.component.rememberHolderPainter
+import com.simohypers.lucid.ui.icon.Add
+import com.simohypers.lucid.ui.icon.AddCircleOutline
+import com.simohypers.lucid.ui.icon.CheckCircle
+import com.simohypers.lucid.ui.icon.DownloadForOffline
+import com.simohypers.lucid.ui.icon.Favorite
+import com.simohypers.lucid.ui.icon.GridView
+import com.simohypers.lucid.ui.icon.PeopleAlt
+import com.simohypers.lucid.ui.icon.LucidIcons
+import com.simohypers.lucid.ui.icon.TrendingUp
+import com.simohypers.lucid.ui.navigation.destination.library.LibraryDynamicPlaylistDestination
+import com.simohypers.lucid.ui.navigation.destination.list.AlbumDestination
+import com.simohypers.lucid.ui.navigation.destination.list.LocalPlaylistDestination
+import com.simohypers.lucid.ui.navigation.destination.list.PlaylistDestination
+import com.simohypers.lucid.ui.navigation.destination.list.PodcastDestination
+import com.simohypers.lucid.ui.screen.library.LibraryDynamicPlaylistType
+import com.simohypers.lucid.ui.theme.typo
+import com.simohypers.lucid.viewModel.AlbumViewModel
+import com.simohypers.lucid.viewModel.HomeViewModel
+import com.simohypers.lucid.viewModel.LibraryViewModel
+import com.simohypers.lucid.viewModel.LocalPlaylistState
+import com.simohypers.lucid.viewModel.LocalPlaylistViewModel
+import com.simohypers.lucid.viewModel.PlaylistViewModel
+import com.simohypers.lucid.viewModel.Shortcut
+import org.jetbrains.compose.resources.StringResource
+import org.jetbrains.compose.resources.pluralStringResource
+import org.jetbrains.compose.resources.stringResource
+import org.koin.compose.viewmodel.koinViewModel
+import lucid.composeapp.generated.resources.Res
+import lucid.composeapp.generated.resources.podcasts
+import lucid.composeapp.generated.resources.albums
+import lucid.composeapp.generated.resources.add
+import lucid.composeapp.generated.resources.add_shortcut
+import lucid.composeapp.generated.resources.album
+import lucid.composeapp.generated.resources.artists
+import lucid.composeapp.generated.resources.library
+import lucid.composeapp.generated.resources.library_downloads
+import lucid.composeapp.generated.resources.library_followed_count
+import lucid.composeapp.generated.resources.liked_songs
+import lucid.composeapp.generated.resources.liked_songs_count
+import lucid.composeapp.generated.resources.most_played
+import lucid.composeapp.generated.resources.playlist
+import lucid.composeapp.generated.resources.playlists
+import lucid.composeapp.generated.resources.remove_shortcut
+import lucid.composeapp.generated.resources.add_to_shortcuts
+import lucid.composeapp.generated.resources.shortcuts
+import lucid.composeapp.generated.resources.shortcuts_desc
+import lucid.composeapp.generated.resources.you
+
+/**
+ * Desktop's Shortcuts: what you pinned from your library, two wide tiles to a row. "Add" opens
+ * [ShortcutPicker]; a long press opens [ItemMenu].
+ */
+@Composable
+fun ShortcutsSection(
+    viewModel: HomeViewModel,
+    navController: NavController,
+) {
+    val shortcuts by viewModel.shortcuts.collectAsStateWithLifecycle()
+    val overview by viewModel.libraryOverview.collectAsStateWithLifecycle()
+    var picking by rememberSaveable { mutableStateOf(false) }
+    var menuFor by remember { mutableStateOf<Shortcut?>(null) }
+    var menuRequest by remember { mutableIntStateOf(0) }
+    val onSurfaceVariant = MaterialTheme.colorScheme.onSurfaceVariant
+
+    Column(Modifier.padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 40.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                LucidIcons.GridView,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
+                modifier = Modifier.size(22.dp),
+            )
+            Spacer(Modifier.width(10.dp))
+            Text(
+                text = stringResource(Res.string.shortcuts),
+                style = typo().headlineMedium,
+                color = MaterialTheme.colorScheme.onBackground,
+                maxLines = 1,
+                modifier = Modifier.weight(1f),
+            )
+            // Adding is an action in the heading, not a tile, so a short last row stays short.
+            if (shortcuts.isNotEmpty() && shortcuts.size < Shortcut.MAX) {
+                Row(
+                    modifier = Modifier.clip(RoundedCornerShape(50)).clickable { picking = true }.padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(LucidIcons.Add, contentDescription = null, tint = onSurfaceVariant, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(stringResource(Res.string.add), style = typo().bodySmall, color = onSurfaceVariant)
+                }
+            }
+        }
+        if (shortcuts.isEmpty()) {
+            EmptyShortcuts { picking = true }
+        } else {
+            shortcuts.chunked(2).forEach { pair ->
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    pair.forEach { shortcut ->
+                        ShortcutTile(
+                            shortcut = shortcut,
+                            overview = overview,
+                            modifier = Modifier.weight(1f),
+                            onClick = { navController.openShortcut(shortcut) },
+                            onLongClick = {
+                                menuRequest++
+                                menuFor = shortcut
+                            },
+                        )
+                    }
+                    if (pair.size == 1) Spacer(Modifier.weight(1f))
+                }
+            }
+        }
+    }
+
+    if (picking) {
+        ShortcutPicker(
+            shortcuts = shortcuts,
+            overview = overview,
+            onToggle = viewModel::toggleShortcut,
+            onDismiss = { picking = false },
+        )
+    }
+    menuFor?.let { shortcut ->
+        key(menuRequest) { ItemMenu(shortcut, onClose = { menuFor = null }) }
+    }
+}
+
+/**
+ * A long press on a shortcut or a card: the ⋮ menu its page shows, plus Add to or Remove from
+ * shortcuts. It opens at once from what the card knows while the page's view model loads behind it
+ * (one per item, kept with the screen); rows that need the tracks wait for them. A collection or a
+ * podcast has no ⋮ menu, so it gets the shortcut row alone.
+ */
+@Composable
+fun ItemMenu(
+    item: Shortcut,
+    onClose: () -> Unit,
+) {
+    val sharedViewModel: SharedViewModel = koinInject()
+    val shortcuts by sharedViewModel.shortcuts.collectAsStateWithLifecycle()
+    val pinned = shortcuts.any { it.sameAs(item) }
+    val onRemove = { sharedViewModel.removeShortcut(item) }
+    val onRemoveShortcut = onRemove.takeIf { pinned }
+    // A full grid takes nothing, so it isn't offered.
+    val onAddShortcut = { sharedViewModel.toggleShortcut(item) }.takeIf { !pinned && shortcuts.size < Shortcut.MAX }
+    val vmKey = "menu:${item.kind}:${item.id}"
+    when (item.kind) {
+        Shortcut.Kind.PLAYLIST, Shortcut.Kind.OWN_PLAYLIST -> {
+            val viewModel: PlaylistViewModel = koinViewModel(key = vmKey)
+            val id = item.id.removePrefix("VL")
+            // Also retries one that failed last time: the view model outlives the menu.
+            LaunchedEffect(Unit) { if (viewModel.uiState.value.data == null) viewModel.getData(id) }
+            PlaylistMenu(
+                viewModel = viewModel,
+                placeholder =
+                    PlaylistState(
+                        id = id,
+                        title = item.title,
+                        isRadio = id.isRadioPlaylistId(),
+                        author = Author(id = "", name = item.subtitle.orEmpty()),
+                        thumbnail = item.thumbnail,
+                        year = "",
+                    ),
+                isYourYouTubePlaylist = item.kind == Shortcut.Kind.OWN_PLAYLIST,
+                onClose = onClose,
+                onDeleted = onRemove,
+                onRemoveShortcut = onRemoveShortcut,
+                onAddShortcut = onAddShortcut,
+            )
+        }
+
+        Shortcut.Kind.ALBUM -> {
+            val viewModel: AlbumViewModel = koinViewModel(key = vmKey)
+            val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+            LaunchedEffect(Unit) {
+                if (viewModel.uiState.value.loadState != LocalPlaylistState.PlaylistLoadState.Success) viewModel.updateBrowseId(item.id)
+            }
+            AlbumMenu(viewModel, uiState, item.id, onClose = onClose, onRemoveShortcut = onRemoveShortcut, onAddShortcut = onAddShortcut)
+        }
+
+        Shortcut.Kind.LOCAL_PLAYLIST -> {
+            val viewModel: LocalPlaylistViewModel = koinViewModel(key = vmKey)
+            val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+            val id = item.id.toLongOrNull()
+            LaunchedEffect(Unit) { if (id != null && uiState.id != id) viewModel.updatePlaylistState(id) }
+            // A local read, a few milliseconds: the menu waits for it rather than guess the Sync row.
+            if (id != null && uiState.id == id) {
+                LocalPlaylistMenu(
+                    viewModel,
+                    uiState,
+                    onClose = onClose,
+                    onDeleted = onRemove,
+                    onRemoveShortcut = onRemoveShortcut,
+                    onAddShortcut = onAddShortcut,
+                )
+            }
+        }
+
+        Shortcut.Kind.COLLECTION, Shortcut.Kind.PODCAST -> {
+            val toggle = onRemoveShortcut ?: onAddShortcut
+            // Not pinned and the grid is full: nothing to offer.
+            if (toggle == null) {
+                LaunchedEffect(Unit) { onClose() }
+                return
+            }
+            SettingSheet(title = item.displayTitle(), onDismiss = onClose) { colors ->
+                Row(
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(rounded(10.dp))
+                            .clickable {
+                                toggle()
+                                onClose()
+                            }.padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(LucidIcons.GridView, contentDescription = null, tint = colors.content)
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        stringResource(if (pinned) Res.string.remove_shortcut else Res.string.add_to_shortcuts),
+                        style = typo().labelSmall,
+                        color = colors.content,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** A feed card's long press: [ArtistMenu] for an artist, else [ItemMenu]. A song or video has the song menu. */
+@Composable
+fun ContentMenu(
+    content: Content,
+    onClose: () -> Unit,
+) {
+    val artist = (content.pageDestination() as? ArtistDestination)?.channelId
+    val item = content.menuShortcut()
+    when {
+        artist != null -> ArtistMenu(artist, onClose)
+        item != null -> ItemMenu(item, onClose)
+        else -> LaunchedEffect(Unit) { onClose() }
+    }
+}
+
+/**
+ * What a card's long press opens [ItemMenu] on, from what the card holds. Null when the card has no
+ * such menu: a song or video has the song menu, an artist [ArtistMenu], a mood tile nothing. A
+ * playlist from search or a feed is taken as someone else's (its menu still finds out once it
+ * loads); Library's grids, which know yours, pass [toShortcut] instead.
+ */
+@Composable
+fun HomeContentType.menuShortcut(): Shortcut? {
+    val thumb =
+        when (this) {
+            is Content -> thumbnails.lastOrNull()?.url
+            is ResultAlbum -> thumbnails.lastOrNull()?.url
+            is ResultSingle -> thumbnails.lastOrNull()?.url
+            is ResultPlaylist -> thumbnails.lastOrNull()?.url
+            is PlaylistsResult -> thumbnails.lastOrNull()?.url
+            else -> null
+        }
+    return when (this) {
+        is Content ->
+            when (val page = pageDestination()) {
+                is PlaylistDestination -> Shortcut(Shortcut.Kind.PLAYLIST, page.playlistId, title, description, thumb)
+                is AlbumDestination ->
+                    Shortcut(Shortcut.Kind.ALBUM, page.browseId, title, artists.toListName().connectArtists().ifBlank { null }, thumb)
+                is PodcastDestination -> Shortcut(Shortcut.Kind.PODCAST, page.podcastId, title, description, thumb)
+                else -> null
+            }
+        is PlaylistsResult ->
+            Shortcut(
+                if (playlistType() == PlaylistType.Type.PODCAST) Shortcut.Kind.PODCAST else Shortcut.Kind.PLAYLIST,
+                browseId,
+                title,
+                author,
+                thumb,
+            )
+        is ResultAlbum -> Shortcut(Shortcut.Kind.ALBUM, browseId, title, year, thumb)
+        is ResultSingle -> Shortcut(Shortcut.Kind.ALBUM, browseId, title, year, thumb)
+        is ResultPlaylist -> Shortcut(Shortcut.Kind.PLAYLIST, id, title, author, thumb)
+        is PlaylistType -> toShortcut()
+        else -> null
+    }
+}
+
+/** One wide row instead of ghost tiles: this sits on Home for everyone who never pins anything. */
+@Composable
+private fun EmptyShortcuts(onClick: () -> Unit) {
+    val accent = MaterialTheme.colorScheme.primary
+    Row(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .clip(rounded(10.dp))
+                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f))
+                .clickable(onClick = onClick)
+                .padding(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.size(40.dp).clip(rounded(10.dp)).background(accent.copy(alpha = 0.12f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(LucidIcons.Add, contentDescription = null, tint = accent, modifier = Modifier.size(22.dp))
+        }
+        Spacer(Modifier.width(12.dp))
+        Column {
+            Text(stringResource(Res.string.add_shortcut), style = typo().titleSmall, color = MaterialTheme.colorScheme.onSurface)
+            Text(stringResource(Res.string.shortcuts_desc), style = typo().bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ShortcutTile(
+    shortcut: Shortcut,
+    overview: LibraryOverview?,
+    modifier: Modifier,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+) {
+    Row(
+        modifier =
+            modifier
+                .height(56.dp)
+                .clip(rounded(10.dp))
+                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f))
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // Flush with the tile's leading edge, as on desktop.
+        ShortcutArt(shortcut, Modifier.size(56.dp))
+        ShortcutText(shortcut, overview, MaterialTheme.colorScheme.onSurface, Modifier.weight(1f).padding(horizontal = 10.dp))
+    }
+}
+
+@Composable
+private fun ShortcutText(
+    shortcut: Shortcut,
+    overview: LibraryOverview?,
+    titleColor: Color,
+    modifier: Modifier,
+) {
+    Column(modifier) {
+        Text(shortcut.displayTitle(), style = typo().titleSmall, color = titleColor, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        // A collection's count is read live; anything else shows what its card said when pinned.
+        // ponytail: a pinned playlist's track count goes stale; overlay Library's rows if it shows.
+        val subtitle = shortcut.collection()?.countText(overview) ?: shortcut.subtitle
+        if (!subtitle.isNullOrBlank()) {
+            Text(subtitle, style = typo().bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+/** A collection draws its icon on an accent tint, like Library's tiles; anything else its cover. */
+@Composable
+private fun ShortcutArt(
+    shortcut: Shortcut,
+    modifier: Modifier,
+) {
+    val collection = shortcut.collection()
+    if (collection != null) {
+        val accent = MaterialTheme.colorScheme.primary
+        Box(modifier.background(accent.copy(alpha = 0.16f)), contentAlignment = Alignment.Center) {
+            Icon(collection.icon(), contentDescription = null, tint = accent, modifier = Modifier.size(24.dp))
+        }
+    } else {
+        AsyncImage(
+            model = shortcut.thumbnail,
+            placeholder = rememberHolderPainter(),
+            error = rememberHolderPainter(),
+            fallback = rememberHolderPainter(),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = modifier,
+        )
+    }
+}
+
+/**
+ * Pin from the library without hunting for a menu. Stays open so several go in at once; a pinned
+ * row shows a tick and a second tap takes it off.
+ */
+@Composable
+private fun ShortcutPicker(
+    shortcuts: List<Shortcut>,
+    overview: LibraryOverview?,
+    onToggle: (Shortcut) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val library: LibraryViewModel = koinViewModel()
+    val loggedIn by library.youtubeLoggedIn.collectAsStateWithLifecycle(initialValue = false)
+    val local by library.yourLocalPlaylist.collectAsStateWithLifecycle()
+    val youTube by library.youTubePlaylist.collectAsStateWithLifecycle()
+    val saved by library.savedPlaylists.collectAsStateWithLifecycle()
+    val albums by library.albums.collectAsStateWithLifecycle()
+    val podcasts by library.favoritePodcasts.collectAsStateWithLifecycle()
+    LaunchedEffect(loggedIn) {
+        library.getLocalPlaylist()
+        library.getSavedPlaylists()
+        library.getAlbums()
+        library.getFavoritePodcasts()
+        if (loggedIn && youTube.data.isNullOrEmpty()) library.getYouTubePlaylist()
+    }
+    val groups =
+        listOf(
+            Res.string.library to Collections.map { it.toShortcut() },
+            Res.string.playlists to
+                (local.data.orEmpty() + saved + if (loggedIn) youTube.data.orEmpty() else emptyList()).mapNotNull { it.toShortcut() },
+            Res.string.albums to albums.data.orEmpty().mapNotNull { it.toShortcut() },
+            Res.string.podcasts to podcasts.data.orEmpty().mapNotNull { it.toShortcut() },
+        ).filter { it.second.isNotEmpty() }
+    val full = shortcuts.size >= Shortcut.MAX
+
+    SettingSheet(title = stringResource(Res.string.add_shortcut), onDismiss = onDismiss) { colors ->
+        // Capped so a long library scrolls inside the sheet instead of pushing it under the status bar.
+        LazyColumn(Modifier.heightIn(max = 560.dp)) {
+            groups.forEach { (label, items) ->
+                item(key = label.key) {
+                    Text(
+                        stringResource(label),
+                        style = typo().bodySmall,
+                        color = colors.subtitle,
+                        modifier = Modifier.padding(top = 10.dp, bottom = 4.dp),
+                    )
+                }
+                items(items, key = { "${it.kind}:${it.id}" }) { shortcut ->
+                    val pinned = shortcuts.any { it.sameAs(shortcut) }
+                    val enabled = pinned || !full
+                    Row(
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(rounded(10.dp))
+                                .clickable(enabled = enabled) { onToggle(shortcut) }
+                                .padding(vertical = 6.dp)
+                                .alpha(if (enabled) 1f else 0.4f),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        ShortcutArt(shortcut, Modifier.size(48.dp).clip(rounded(8.dp)))
+                        ShortcutText(shortcut, overview, colors.content, Modifier.weight(1f).padding(horizontal = 12.dp))
+                        Icon(
+                            if (pinned) LucidIcons.CheckCircle else LucidIcons.AddCircleOutline,
+                            contentDescription = null,
+                            tint = if (pinned) MaterialTheme.colorScheme.primary else colors.subtitle,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+fun NavController.openShortcut(shortcut: Shortcut) {
+    when (shortcut.kind) {
+        Shortcut.Kind.COLLECTION -> navigate(LibraryDynamicPlaylistDestination(type = shortcut.id))
+        Shortcut.Kind.LOCAL_PLAYLIST -> shortcut.id.toLongOrNull()?.let { navigate(LocalPlaylistDestination(it)) }
+        Shortcut.Kind.PLAYLIST -> navigate(PlaylistDestination(shortcut.id))
+        Shortcut.Kind.OWN_PLAYLIST -> navigate(PlaylistDestination(shortcut.id, isYourYouTubePlaylist = true))
+        Shortcut.Kind.ALBUM -> navigate(AlbumDestination(shortcut.id))
+        Shortcut.Kind.PODCAST -> navigate(PodcastDestination(podcastId = shortcut.id))
+    }
+}
+
+/** Library's four collections, in the order its tiles read. */
+private val Collections =
+    listOf(
+        LibraryDynamicPlaylistType.Favorite,
+        LibraryDynamicPlaylistType.Downloaded,
+        LibraryDynamicPlaylistType.MostPlayed,
+        LibraryDynamicPlaylistType.Followed,
+    )
+
+private fun Shortcut.collection(): LibraryDynamicPlaylistType? =
+    if (kind == Shortcut.Kind.COLLECTION) Collections.firstOrNull { it.toStringParams() == id } else null
+
+/** A collection's name follows the app's language; anything else keeps the title it was pinned with. */
+@Composable
+private fun Shortcut.displayTitle(): String = collection()?.let { stringResource(it.label()) } ?: title
+
+private fun LibraryDynamicPlaylistType.label(): StringResource =
+    when (this) {
+        LibraryDynamicPlaylistType.Favorite -> Res.string.liked_songs
+        LibraryDynamicPlaylistType.Downloaded -> Res.string.library_downloads
+        LibraryDynamicPlaylistType.MostPlayed -> Res.string.most_played
+        else -> Res.string.artists
+    }
+
+private fun LibraryDynamicPlaylistType.icon(): ImageVector =
+    when (this) {
+        LibraryDynamicPlaylistType.Favorite -> LucidIcons.Favorite
+        LibraryDynamicPlaylistType.Downloaded -> LucidIcons.DownloadForOffline
+        LibraryDynamicPlaylistType.MostPlayed -> LucidIcons.TrendingUp
+        else -> LucidIcons.PeopleAlt
+    }
+
+@Composable
+private fun LibraryDynamicPlaylistType.countText(overview: LibraryOverview?): String? {
+    val count =
+        when (this) {
+            LibraryDynamicPlaylistType.Favorite -> overview?.favorite
+            LibraryDynamicPlaylistType.Downloaded -> overview?.downloaded
+            LibraryDynamicPlaylistType.MostPlayed -> overview?.mostPlayed
+            else -> overview?.followed
+        }?.count ?: return null
+    return if (this == LibraryDynamicPlaylistType.Followed) {
+        pluralStringResource(Res.plurals.library_followed_count, count, count)
+    } else {
+        pluralStringResource(Res.plurals.liked_songs_count, count, count)
+    }
+}
+
+@Composable
+private fun LibraryDynamicPlaylistType.toShortcut() = Shortcut(Shortcut.Kind.COLLECTION, toStringParams(), stringResource(label()))
+
+/** What a Library card says about [this], as a Shortcut; the kinds match `openLibraryItem`. */
+@Composable
+fun PlaylistType.toShortcut(): Shortcut? =
+    when (this) {
+        is LocalPlaylistEntity -> Shortcut(Shortcut.Kind.LOCAL_PLAYLIST, id.toString(), title, stringResource(Res.string.you), thumbnail)
+        is PlaylistsResult -> Shortcut(Shortcut.Kind.OWN_PLAYLIST, browseId, title, author, thumbnails.lastOrNull()?.url)
+        is AlbumEntity ->
+            Shortcut(Shortcut.Kind.ALBUM, browseId, title, artistName?.connectArtists() ?: stringResource(Res.string.album), thumbnails)
+        is AlbumsResult ->
+            Shortcut(
+                Shortcut.Kind.ALBUM,
+                browseId,
+                title,
+                artists.joinToString { it.name }.ifEmpty { stringResource(Res.string.album) },
+                thumbnails.lastOrNull()?.url,
+            )
+        is PlaylistEntity -> Shortcut(Shortcut.Kind.PLAYLIST, id, title, author ?: stringResource(Res.string.playlist), thumbnails)
+        is PodcastsEntity -> Shortcut(Shortcut.Kind.PODCAST, podcastId, title, authorName, thumbnail)
+        else -> null
+    }

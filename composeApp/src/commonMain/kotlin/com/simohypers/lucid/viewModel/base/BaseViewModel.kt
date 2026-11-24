@@ -1,0 +1,235 @@
+package com.simohypers.lucid.viewModel.base
+
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.Job
+import com.simohypers.lucid.common.Connectivity
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.simohypers.lucid.common.Config
+import com.simohypers.lucid.domain.data.model.browse.album.Track
+import com.simohypers.lucid.domain.data.model.streams.YouTubeWatchEndpoint
+import com.simohypers.lucid.domain.mediaservice.handler.MediaPlayerHandler
+import com.simohypers.lucid.domain.mediaservice.handler.PlaylistType
+import com.simohypers.lucid.domain.mediaservice.handler.QueueData
+import com.simohypers.lucid.domain.repository.SongRepository
+import com.simohypers.lucid.domain.utils.Resource
+import com.simohypers.lucid.domain.utils.isRadioQueueId
+import com.simohypers.lucid.logger.LogLevel
+import com.simohypers.lucid.logger.Logger
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.onCompletion
+import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import multiplatform.network.cmptoast.ToastDuration
+import multiplatform.network.cmptoast.ToastGravity
+import multiplatform.network.cmptoast.showToast
+import org.jetbrains.compose.resources.StringResource
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.inject
+import lucid.composeapp.generated.resources.Res
+import lucid.composeapp.generated.resources.error
+import lucid.composeapp.generated.resources.loading
+import lucid.composeapp.generated.resources.starting_radio
+
+abstract class BaseViewModel :
+    ViewModel(),
+    KoinComponent {
+    protected val mediaPlayerHandler: MediaPlayerHandler by inject<MediaPlayerHandler>()
+    private val _nowPlayingVideoId: MutableStateFlow<String> = MutableStateFlow("")
+
+    /**
+     * Get now playing video id
+     * If empty, no video is playing
+     */
+    val nowPlayingVideoId: StateFlow<String> get() = _nowPlayingVideoId
+
+    /**
+     * Tag for logging
+     */
+    protected val tag: String = this::class.simpleName ?: "BaseViewModel"
+
+    private var reloadJob: Job? = null
+
+    /**
+     * The page could not load: [reload] runs by itself the next time a network comes back (or the
+     * phone moves to another one), if [stillFailed] by then. Called where a page records its
+     * error; a later call replaces the earlier one.
+     */
+    protected fun reloadWhenOnline(
+        stillFailed: () -> Boolean,
+        reload: () -> Unit,
+    ) {
+        reloadJob?.cancel()
+        reloadJob =
+            viewModelScope.launch {
+                Connectivity.reconnects().first()
+                if (stillFailed()) {
+                    log("Back online: loading the page again")
+                    reload()
+                }
+            }
+    }
+
+    /**
+     * Log with viewModel tag
+     */
+    protected fun log(
+        message: String,
+        logType: LogLevel = LogLevel.DEBUG,
+    ) {
+        when (logType) {
+            LogLevel.DEBUG -> Logger.d(tag, message)
+            LogLevel.INFO -> Logger.i(tag, message)
+            LogLevel.WARN -> Logger.w(tag, message)
+            LogLevel.ERROR -> Logger.e(tag, message)
+        }
+    }
+
+    /**
+     * Cancel all jobs
+     */
+    override fun onCleared() {
+        super.onCleared()
+        viewModelScope.cancel()
+        log("ViewModel cleared")
+    }
+
+    init {
+        getNowPlayingVideoId()
+    }
+
+    companion object {
+        private val waits = MutableStateFlow<List<StringResource>>(emptyList())
+
+        /** What the app is fetching behind a closed menu, newest last, for the pill above the mini player. */
+        val busyLabels: StateFlow<List<StringResource>> = waits
+
+        private val plays = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+        /** A play the user asked for (a tapped song, Play, Shuffle, a radio), for the open-player setting. */
+        val userPlays: SharedFlow<Unit> = plays
+    }
+
+    /** Runs [block] with the pill above the mini player saying [label]. */
+    protected suspend fun <T> busy(
+        label: StringResource,
+        block: suspend () -> T,
+    ): T {
+        waits.update { it + label }
+        try {
+            return block()
+        } finally {
+            waits.update { it - label }
+        }
+    }
+
+    /** This flow, with the pill above the mini player saying [label] until it ends. */
+    protected fun <T> Flow<T>.busy(label: StringResource): Flow<T> =
+        onStart { waits.update { it + label } }.onCompletion { waits.update { it - label } }
+
+    fun makeToast(message: String?) {
+        showToast(
+            message = message ?: "NO MESSAGE",
+            duration = ToastDuration.Short,
+            gravity = ToastGravity.Bottom,
+        )
+    }
+
+    protected fun getString(resId: StringResource): String =
+        runBlocking {
+            org.jetbrains.compose.resources
+                .getString(resId)
+        }
+
+    // Loading dialog
+    private val _showLoadingDialog: MutableStateFlow<Pair<Boolean, String>> = MutableStateFlow(false to getString(Res.string.loading))
+    val showLoadingDialog: StateFlow<Pair<Boolean, String>> get() = _showLoadingDialog
+
+    fun showLoadingDialog(message: String? = null) {
+        _showLoadingDialog.value = true to (message ?: getString(Res.string.loading))
+    }
+
+    fun hideLoadingDialog() {
+        _showLoadingDialog.value = false to getString(Res.string.loading)
+    }
+
+    private fun getNowPlayingVideoId() {
+        viewModelScope.launch {
+            combine(mediaPlayerHandler.nowPlayingState, mediaPlayerHandler.controlState) { nowPlayingState, controlState ->
+                Pair(nowPlayingState, controlState)
+            }.collect { (nowPlayingState, controlState) ->
+                if (controlState.isPlaying) {
+                    _nowPlayingVideoId.value = nowPlayingState.songEntity?.videoId ?: ""
+                } else {
+                    _nowPlayingVideoId.value = ""
+                }
+            }
+        }
+    }
+
+    /**
+     * Communicate with SimpleMediaServiceHandler to load media item
+     */
+    fun setQueueData(queueData: QueueData.Data) {
+        mediaPlayerHandler.setQueueData(queueData)
+    }
+
+    fun <T> loadMediaItem(
+        anyTrack: T,
+        type: String,
+        index: Int? = null,
+    ) {
+        viewModelScope.launch {
+            mediaPlayerHandler.loadMediaItem(
+                anyTrack = anyTrack,
+                type = type,
+                index = index,
+            )
+            plays.tryEmit(Unit)
+        }
+    }
+
+    private val playbackSongRepository: SongRepository by inject<SongRepository>()
+
+    /**
+     * Plays what a YouTube play button points at, as the queue `/next` returns for it: a song's
+     * radio (an `RD…` id), or a playlist, an album, a shelf's "Play all" as a plain list. Used by
+     * Home's card play buttons and shelf headers, so they never need to open a page first.
+     */
+    fun playFromEndpoint(
+        endpoint: YouTubeWatchEndpoint,
+        name: String,
+    ) {
+        val isRadio = endpoint.playlistId?.isRadioQueueId() == true
+        viewModelScope.launch {
+            playbackSongRepository.getRadioFromEndpoint(endpoint).busy(if (isRadio) Res.string.starting_radio else Res.string.loading).collectLatest { res ->
+                val tracks = res.data?.first
+                if (res is Resource.Success && !tracks.isNullOrEmpty()) {
+                    setQueueData(
+                        QueueData.Data(
+                            listTracks = tracks.toCollection(arrayListOf<Track>()),
+                            firstPlayedTrack = tracks.first(),
+                            playlistId = endpoint.playlistId,
+                            playlistName = name,
+                            playlistType = if (isRadio) PlaylistType.RADIO else PlaylistType.PLAYLIST,
+                            continuation = res.data?.second,
+                            nextContinuation = true,
+                        ),
+                    )
+                    loadMediaItem(tracks.first(), if (isRadio) Config.RADIO_CLICK else Config.PLAYLIST_CLICK, 0)
+                } else {
+                    makeToast(res.message ?: getString(Res.string.error))
+                }
+            }
+        }
+    }
+}

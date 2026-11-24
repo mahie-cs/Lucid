@@ -1,0 +1,802 @@
+@file:OptIn(ExperimentalTime::class)
+
+package com.simohypers.lucid.data.repository
+
+import com.simohypers.lucid.domain.data.model.browse.artist.sameArtistName
+import com.simohypers.lucid.data.db.datasource.LocalDataSource
+import com.simohypers.lucid.data.mapping.toLyrics
+import com.simohypers.lucid.domain.data.entities.LyricsEntity
+import com.simohypers.lucid.domain.data.model.lyrics.LucidException
+import com.simohypers.lucid.domain.data.model.lyrics.LucidRating
+import com.simohypers.lucid.domain.data.model.lyrics.LyricsRecheck
+import com.simohypers.lucid.domain.data.model.lyrics.LyricsSource
+import com.simohypers.lucid.domain.data.model.lyrics.RECHECK_LUCID_SECS
+import com.simohypers.lucid.domain.data.model.lyrics.RECHECK_OTHER_SECS
+import com.simohypers.lucid.domain.manager.DataStoreManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import com.simohypers.lucid.lyrics.LucidLyrics
+import com.simohypers.lucid.domain.utils.toLyricsEntity
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeout
+import com.simohypers.lucid.domain.data.model.browse.artist.ArtistEditorial
+import com.simohypers.lucid.domain.data.model.browse.artist.ArtistLogo
+import com.simohypers.lucid.domain.data.model.browse.artist.ArtistMotion
+import com.simohypers.lucid.domain.data.model.canvas.CanvasResult
+import com.simohypers.lucid.domain.data.model.metadata.Lyrics
+import com.simohypers.lucid.domain.extension.now
+import com.simohypers.lucid.domain.repository.LyricsCanvasRepository
+import com.simohypers.lucid.domain.utils.Resource
+import com.simohypers.lucid.kotlinytmusicscraper.YouTube
+import com.simohypers.lucid.logger.Logger
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import com.simohypers.lucid.lyrics.LyricsProviders
+import com.simohypers.lucid.lyrics.LyricsQuery
+import com.simohypers.lucid.lyrics.AppleMusicClient
+import com.simohypers.lucid.lyrics.parser.parseUnsyncedLyrics
+import com.simohypers.lucid.lyrics.am.AMAlbumResource
+import com.simohypers.lucid.lyrics.am.AMArtwork
+import com.simohypers.lucid.lyrics.am.AMEditorialVideo
+import com.simohypers.lucid.lyrics.am.AMMotionVideo
+import com.simohypers.lucid.lyrics.am.AMSongWithAlbum
+import com.simohypers.lucid.lyrics.am.toImageUrl
+import kotlin.math.abs
+import kotlin.time.Clock
+import kotlin.time.ExperimentalTime
+
+internal class LyricsCanvasRepositoryImpl(
+    private val localDataSource: LocalDataSource,
+    private val youTube: YouTube,
+    private val appleMusic: AppleMusicClient,
+    private val lyricsProviders: LyricsProviders,
+    private val lucid: LucidLyrics,
+    private val dataStoreManager: DataStoreManager,
+) : LyricsCanvasRepository {
+    /** Hints go out behind the lyrics on screen; nothing waits on them. */
+    private val background = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** Held while an anonymous account is being made, so a vote and a report sent together make one between them. */
+    private val makingAccount = Mutex()
+
+    /**
+     * Video ids whose animated artwork is being searched right now, so the same track is never sent
+     * to AM twice at once. Not a cancellation: the first attempt is the one that fills the cache.
+     */
+    private val amArtworkInFlight = mutableSetOf<String>()
+    private val amArtworkLock = Mutex()
+
+    override fun getSavedLyrics(videoId: String): Flow<LyricsEntity?> = flow { emit(localDataSource.getSavedLyrics(videoId)) }.flowOn(Dispatchers.IO)
+
+    override suspend fun insertLyrics(lyricsEntity: LyricsEntity) =
+        withContext(Dispatchers.IO) {
+            localDataSource.insertLyrics(lyricsEntity)
+        }
+
+    override suspend fun getLyrics(
+        videoId: String,
+        title: String,
+        artist: String,
+        album: String?,
+        durationSeconds: Int,
+        order: List<Pair<LyricsSource, Boolean>>,
+    ): LyricsEntity? =
+        withContext(Dispatchers.IO) {
+            val now = Clock.System.now().epochSeconds
+            val cached = localDataSource.getSavedLyrics(videoId)
+            if (cached != null && cached.fetchedAt > 0 && (!cached.error || now - cached.fetchedAt < LYRICS_MISS_TTL_SECS)) {
+                return@withContext cached.takeUnless { it.error }
+            }
+            val query = LyricsQuery(videoId, title, artist, album, durationSeconds.takeIf { it > 0 })
+            val sources = order.filter { it.second }.map { it.first }
+            // Synced beats plain: the first synced answer down the list wins, and only when none is
+            // synced does the first plain one. A miss is cached only when some provider answered:
+            // a run where all of them merely errored (offline) must not hide lyrics for a day.
+            coroutineScope {
+                // Provider i starts at i x stagger instead of after provider i-1 answers (Lucid
+                // #482), so a song with no lyrics anywhere doesn't wait on every provider in turn.
+                // Answers are still read in the user's order; a hit cancels the rest. Lucid takes
+                // no slot: the source after it starts alongside it, or every song Lucid doesn't
+                // hold would reach the others 300 ms later than before it led the list.
+                var slot = 0
+                val answers =
+                    sources.map { source ->
+                        val wait = LYRICS_STAGGER_MS * (if (source == LyricsSource.LUCID) slot else slot++)
+                        async {
+                            delay(wait)
+                            try {
+                                Result.success(withTimeout(LYRICS_PROVIDER_BUDGET_MS) { askLyricsSource(source, query, now) })
+                            } catch (e: TimeoutCancellationException) {
+                                Result.failure(e)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                Result.failure(e)
+                            }
+                        }
+                    }
+                var answered = false
+                var plain: LyricsEntity? = null
+                var synced: LyricsEntity? = null
+                for ((i, source) in sources.withIndex()) {
+                    val answer = answers[i].await()
+                    if (answer.isFailure) {
+                        Logger.d(LYRICS_TAG, "${source.id} failed: ${answer.exceptionOrNull()?.message}")
+                        continue
+                    }
+                    answered = true
+                    val entity = answer.getOrNull() ?: continue
+                    Logger.d(LYRICS_TAG, "${source.id}: ${entity.syncType}, ${entity.lines?.size} lines")
+                    if (entity.syncType != "UNSYNCED") {
+                        synced = entity
+                        break
+                    }
+                    plain = plain ?: entity
+                }
+                answers.forEach { it.cancel() }
+                val found = synced ?: plain
+                found?.let { hint(it, query, order) }
+                when {
+                    found != null -> localDataSource.insertLyrics(found)
+                    answered -> localDataSource.insertLyrics(LyricsEntity(videoId, error = true, lines = null, syncType = null, fetchedAt = now))
+                }
+                found
+            }
+        }
+
+    override suspend fun previewLyrics(
+        videoId: String,
+        source: LyricsSource,
+        title: String,
+        artist: String,
+        album: String?,
+        durationSeconds: Int,
+        searched: Boolean,
+    ): LyricsEntity? =
+        withContext(Dispatchers.IO) {
+            askLyricsSource(source, LyricsQuery(videoId, title, artist, album, durationSeconds.takeIf { it > 0 }, searched), Clock.System.now().epochSeconds)
+        }
+
+    override suspend fun recheckLyrics(
+        videoId: String,
+        order: List<Pair<LyricsSource, Boolean>>,
+    ): Boolean =
+        withContext(Dispatchers.IO) {
+            val now = Clock.System.now().epochSeconds
+            val cached = localDataSource.getSavedLyrics(videoId) ?: return@withContext false
+            val kind = LyricsRecheck.due(cached, now - cached.fetchedAt, order) ?: return@withContext false
+            // Stamped before the request leaves, not when it answers: a second look at the song
+            // meanwhile finds nothing due, and it makes this one request per song per day at most.
+            localDataSource.insertLyrics(cached.copy(fetchedAt = now))
+            val answer =
+                try {
+                    lucid.get(videoId, cached.revision.takeIf { kind == LyricsRecheck.REVISION })
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Logger.d(LYRICS_TAG, "lucid recheck failed: ${e.message}")
+                    null
+                }
+            // Pinned, nudged, replaced or cleared while the request was away: not the row that was due.
+            val row = localDataSource.getSavedLyrics(videoId)
+            if (row == null || row.pinned || row.provider != cached.provider || row.revision != cached.revision) return@withContext false
+            when (answer) {
+                null -> {
+                    // Offline is not "Lucid doesn't have it": a week is too long to wait on that.
+                    if (kind == LyricsRecheck.ASK) localDataSource.insertLyrics(row.copy(fetchedAt = now - RECHECK_OTHER_SECS + RECHECK_LUCID_SECS))
+                    false
+                }
+                LucidLyrics.Fresh.Same -> false
+                // A reviewer took Lucid's lyric down: the next look walks the list again.
+                LucidLyrics.Fresh.Gone -> {
+                    if (kind == LyricsRecheck.REVISION) localDataSource.deleteLyrics(videoId)
+                    kind == LyricsRecheck.REVISION
+                }
+                is LucidLyrics.Fresh.New -> {
+                    val new = answer.lyric.toEntity(videoId, now)
+                    localDataSource.insertLyrics(new)
+                    // A rename shows too: the credit is read when the service answers.
+                    new.lines != row.lines || new.origin != row.origin || new.authors != row.authors
+                }
+            }
+        }
+
+    override suspend fun lucidRating(videoId: String): LucidRating? =
+        withContext(Dispatchers.IO) {
+            val token = lucidToken()
+            try {
+                lucid.rating(videoId, token)
+            } catch (e: LucidException) {
+                // The service refuses a dead session even where one is optional: ask again as nobody.
+                if (e.code != UNAUTHORIZED || token == null) throw e
+                forgetLucidToken(token)
+                lucid.rating(videoId, null)
+            }
+        }
+
+    override suspend fun lucidVote(
+        videoId: String,
+        value: Int,
+        before: LucidRating,
+    ): LucidRating = withContext(Dispatchers.IO) { asContributor { lucid.vote(videoId, value, it, before) } }
+
+    override suspend fun lucidReport(
+        videoId: String,
+        reason: String,
+        note: String?,
+    ) = withContext(Dispatchers.IO) { asContributor { lucid.report(videoId, reason, note, it) } }
+
+    private suspend fun lucidToken() = dataStoreManager.lucidLyricsToken.first().takeIf { it.isNotEmpty() }
+
+    private suspend fun forgetLucidToken(token: String) =
+        makingAccount.withLock {
+            if (lucidToken() == token) dataStoreManager.setLucidLyricsToken("")
+        }
+
+    /**
+     * The session there is, else a new anonymous account's, kept; true when it was just made. Never
+     * [refused] again: a session the service turned down, though one made meanwhile is used.
+     */
+    private suspend fun sessionOrNew(refused: String? = null): Pair<String, Boolean> =
+        makingAccount.withLock {
+            lucidToken()?.takeIf { it != refused }?.let { return@withLock it to false }
+            val token = lucid.anonymous()
+            dataStoreManager.setLucidLyricsToken(token)
+            Logger.d(LYRICS_TAG, "lucid: anonymous account made")
+            token to true
+        }
+
+    /**
+     * A write as this install's account, an anonymous one made for it the first time. When the
+     * service no longer knows the session (it lasts a year), another is made and the write tried
+     * once more.
+     */
+    private suspend fun <T> asContributor(call: suspend (String) -> T): T {
+        val (token, fresh) = sessionOrNew()
+        return try {
+            call(token)
+        } catch (e: LucidException) {
+            if (e.code != UNAUTHORIZED) throw e
+            forgetLucidToken(token)
+            if (fresh) throw e
+            call(sessionOrNew(refused = token).first)
+        }
+    }
+
+    /**
+     * Tell Lucid Lyrics a source it mirrors had this song word by word, so it fetches the lyric
+     * itself. One per song per install, since the hit is cached after; never with the Lucid
+     * source off, which is the off switch.
+     */
+    private fun hint(
+        found: LyricsEntity,
+        q: LyricsQuery,
+        order: List<Pair<LyricsSource, Boolean>>,
+    ) {
+        val provider = found.provider ?: return
+        if (provider !in LucidLyrics.MIRRORED || found.syncType != "RICH_SYNCED" || q.searched) return
+        if (order.none { it.first == LyricsSource.LUCID && it.second }) return
+        background.launch {
+            runCatching { lucid.hint(q.videoId, provider, q.title, q.artist, q.album, q.durationSeconds) }
+                .onFailure { Logger.d(LYRICS_TAG, "lucid hint failed: ${it.message}") }
+        }
+    }
+
+    private fun LucidLyrics.Lyric.toEntity(
+        videoId: String,
+        now: Long,
+    ): LyricsEntity =
+        lyrics.toLyrics().toLyricsEntity(videoId).copy(
+            provider = LyricsSource.LUCID.id,
+            fetchedAt = now,
+            revision = revision,
+            origin = origin,
+            authors = authors.ifEmpty { null },
+        )
+
+    override suspend fun forgetLyrics(videoId: String) = withContext(Dispatchers.IO) { localDataSource.deleteLyrics(videoId) }
+
+    override suspend fun clearUnpinnedLyrics() = withContext(Dispatchers.IO) { localDataSource.deleteUnpinnedLyrics() }
+
+    private fun com.simohypers.lucid.lyrics.domain.Lyrics.toEntity(
+        videoId: String,
+        source: LyricsSource,
+        now: Long,
+    ): LyricsEntity? = toLyrics()?.toLyricsEntity(videoId)?.copy(provider = source.id, fetchedAt = now)
+
+    // YouTube Music needs the scraper, which the lyrics module doesn't have; the rest are there.
+    // Lucid goes by video id only, so a title typed in the source sheet skips it.
+    private suspend fun askLyricsSource(
+        source: LyricsSource,
+        query: LyricsQuery,
+        now: Long,
+    ): LyricsEntity? =
+        when (source) {
+            LyricsSource.YOUTUBE ->
+                youTube.plainLyrics(query.videoId).getOrThrow()?.takeIf { it.isNotBlank() }?.let(::parseUnsyncedLyrics)?.toEntity(query.videoId, source, now)
+            LyricsSource.LUCID ->
+                if (query.searched) null else (lucid.get(query.videoId) as? LucidLyrics.Fresh.New)?.lyric?.toEntity(query.videoId, now)
+            else -> lyricsProviders.ask(source.id, query)?.toEntity(query.videoId, source, now)
+        }
+
+    /**
+     * Animated album artwork from the hidden AM catalog. It fills exactly the slot a Spotify canvas
+     * fills — same [CanvasResult], same two columns on `song` — so everything downstream is unaware
+     * of which source produced it. Unlike the canvas path it needs no account of any kind.
+     */
+    override fun getAMAnimatedArtwork(videoId: String): Flow<Resource<CanvasResult>> =
+        flow {
+            val song = localDataSource.getSong(videoId)
+            if (song == null) {
+                Logger.e(AM_ARTWORK_TAG, "Not found $videoId")
+                emit(Resource.Error<CanvasResult>("Song not found"))
+                return@flow
+            }
+            // Reuse what an earlier play already resolved. The column is shared with the Spotify
+            // canvas, so only an HLS url is taken back — an `.mp4` left there by that path would
+            // pin the track to it and this source would never be asked. Without this the number of
+            // requests grows with plays rather than with tracks, against an API that is not ours.
+            val cached = song.canvasUrl?.takeIf { it.contains(".m3u8") }
+            if (cached != null) {
+                // Logged because a cache hit returns without touching the network: without this
+                // line a stale url looks identical to a fresh mismatch in the log.
+                Logger.d(AM_ARTWORK_TAG, "cache hit for $videoId (${song.title}) --> $cached")
+                emit(
+                    Resource.Success(
+                        CanvasResult(
+                            isVideo = true,
+                            canvasUrl = cached,
+                            canvasThumbUrl = song.canvasThumbUrl,
+                        ),
+                    ),
+                )
+                return@flow
+            }
+
+            // The caller launches this outside the collector that triggered it, so a second
+            // timeline emission for the same track — the duration changes once buffering finishes —
+            // fires an identical second search while the first is still in the air. Claiming the id
+            // drops the duplicate without cancelling the attempt that is already running.
+            if (!claimAmArtwork(videoId)) {
+                emit(Resource.Error<CanvasResult>("Already searching"))
+                return@flow
+            }
+
+            val artist = song.artistName?.firstOrNull().orEmpty()
+            // YouTube Music leaves the album name null on plenty of rows, and rows written by older
+            // builds carry the literal placeholder "Album"; neither can be searched for.
+            val albumName = song.albumName?.takeIf { it.isNotBlank() && it != PLACEHOLDER_ALBUM_NAME }
+            Logger.d(AM_ARTWORK_TAG, "resolving $videoId — album=$albumName title=${song.title} artist=$artist")
+
+            try {
+                // Tier 1 — the album name, which is what AM indexes one animated artwork against.
+                // Only an exact answer is taken: see pickAlbumMatch for why a near-miss is worse
+                // than no answer at all here.
+                val byAlbum =
+                    albumName?.let { name ->
+                        appleMusic
+                            .searchAMAlbum("$name $artist".cleanForSearch(), limit = AM_SEARCH_LIMIT)
+                            .onFailure { Logger.e(AM_ARTWORK_TAG, "album search failed: ${it.message}") }
+                            .getOrNull()
+                            ?.pickAlbumMatch(name, artist)
+                    }
+
+                // Tier 2 — the track itself, which carries the album it belongs to. A title cannot
+                // be searched as an album (AM answers a title with the singles that share it), so
+                // this goes through songs; the album name, when known, still decides between the
+                // several albums a track can legitimately appear on.
+                val album =
+                    byAlbum ?: appleMusic
+                        .searchAMSongsWithAlbums("${song.title} $artist".cleanForSearch(), limit = AM_SEARCH_LIMIT)
+                        .onFailure { Logger.e(AM_ARTWORK_TAG, "song search failed: ${it.message}") }
+                        .getOrNull()
+                        ?.pickSongMatch(
+                            title = song.title,
+                            artist = artist,
+                            durationSeconds = song.durationSeconds,
+                            albumHint = albumName,
+                        )
+                        ?.album
+
+                val master =
+                    album
+                        ?.attributes
+                        ?.editorialVideo
+                        ?.preferredRendition()
+                        ?.video
+                Logger.d(AM_ARTWORK_TAG, "Matched ${album?.attributes?.name} for $videoId --> $master")
+                if (master == null) {
+                    emit(Resource.Error<CanvasResult>("No animated artwork"))
+                    return@flow
+                }
+                // Resolve the ladder down to one rendition here, so neither player has to choose:
+                // mpv would take the top of it by default (10-bit HEVC at 2048x2732, ~52 MB for a
+                // 22-second loop) and ExoPlayer would pick by bandwidth estimate, giving the two
+                // platforms different results for the same track. Falls back to the master url,
+                // which still plays — just not as cheaply.
+                val url =
+                    appleMusic
+                        .selectAMRendition(master, AM_MIN_RENDITION_WIDTH)
+                        .getOrNull()
+                        ?: master
+                Logger.d(AM_ARTWORK_TAG, "Rendition for $videoId --> $url")
+                val previewFrame =
+                    album.attributes
+                        ?.editorialVideo
+                        ?.preferredRendition()
+                        ?.previewFrame
+                emit(
+                    Resource.Success(
+                        CanvasResult(
+                            isVideo = true,
+                            canvasUrl = url,
+                            // The url is a {w}x{h} template and the frame carries its own
+                            // dimensions — the tall rendition is 2048x2732, not square — so asking
+                            // for a square crop of it would squash the image.
+                            canvasThumbUrl =
+                                previewFrame?.toImageUrl(
+                                    width = previewFrame.width ?: AM_PREVIEW_FRAME_SIZE,
+                                    height = previewFrame.height ?: AM_PREVIEW_FRAME_SIZE,
+                                ),
+                        ),
+                    ),
+                )
+            } finally {
+                amArtworkLock.withLock { amArtworkInFlight -= videoId }
+            }
+        }.flowOn(Dispatchers.IO)
+
+    /** Returns true when this call took ownership of [videoId]; false when a search is already out. */
+    private suspend fun claimAmArtwork(videoId: String): Boolean =
+        amArtworkLock.withLock {
+            if (videoId in amArtworkInFlight) false else amArtworkInFlight.add(videoId)
+        }
+
+    override suspend fun updateCanvasUrl(
+        videoId: String,
+        canvasUrl: String,
+    ) = withContext(Dispatchers.IO) {
+        localDataSource.updateCanvasUrl(videoId, canvasUrl)
+    }
+
+    override suspend fun updateCanvasThumbUrl(
+        videoId: String,
+        canvasThumbUrl: String,
+    ) = withContext(Dispatchers.IO) {
+        localDataSource.updateCanvasThumbUrl(videoId, canvasThumbUrl)
+    }
+
+    override fun getArtistEditorial(artistName: String): Flow<Resource<ArtistEditorial>> =
+        flow {
+            appleMusic
+                .searchAMArtist(artistName, limit = 5)
+                .onSuccess { artists ->
+                    // Only an artist of that very name: the top hit for a name AM does not carry
+                    // is a stranger, whose logo would then title this artist's page.
+                    val id = artists.firstOrNull { sameArtistName(artistName, it.attributes?.name) }?.id
+                    if (id == null) {
+                        // A definitive answer, not a failure: the catalog was reached and holds no
+                        // such artist. Handed back as an empty Success so the caller can remember
+                        // it and stop asking — an Error here is indistinguishable from a dead
+                        // connection, which must NOT be cached.
+                        emit(Resource.Success(ArtistEditorial(logo = null, motion = null)))
+                        return@onSuccess
+                    }
+                    appleMusic
+                        .getAMArtist(id)
+                        .onSuccess { artist ->
+                            val attributes = artist?.attributes
+                            val logo = attributes?.editorialArtwork?.musicContentColorLogoTrimmed
+                            val srcW = logo?.width ?: 0
+                            val srcH = logo?.height ?: 0
+                            // Scale down to ~1000px wide, keeping the logo aspect ratio.
+                            val targetW = AM_LOGO_TARGET_WIDTH
+                            val targetH = if (srcW > 0) (srcH.toLong() * targetW / srcW).toInt() else srcH
+                            val artistLogo =
+                                logo?.toImageUrl(targetW, targetH)?.let { url ->
+                                    ArtistLogo(
+                                        logoUrl = url,
+                                        bgColorHex = logo.bgColor,
+                                        width = srcW,
+                                        height = srcH,
+                                    )
+                                }
+                            val motion = attributes?.editorialVideo?.toArtistMotion()
+                            // Both halves are optional and are reported as they came. They are
+                            // independently present — Billie Eilish ships motion and no name logo,
+                            // Taylor Swift the reverse — so failing on a missing logo would throw
+                            // the video away for exactly the artists that have one. Neither present
+                            // is still a Success, for the same reason as above: this artist
+                            // genuinely has nothing, and that is worth remembering.
+                            emit(Resource.Success(ArtistEditorial(logo = artistLogo, motion = motion)))
+                        }.onFailure {
+                            emit(Resource.Error<ArtistEditorial>(it.message ?: "Failed to fetch artist"))
+                        }
+                }.onFailure {
+                    emit(Resource.Error<ArtistEditorial>(it.message ?: "Artist search failed"))
+                }
+        }.flowOn(Dispatchers.IO)
+
+    /**
+     * Resolve the artist's animated artwork down to the two cuts the header can actually use.
+     *
+     * `motionArtistFullscreen16x9` is the same master as `motionArtistWide16x9` and is read only
+     * as a fallback. Each master is collapsed to a single rendition here rather than at play time,
+     * for the same reason the album path does it: left to themselves mpv takes the top of the
+     * ladder and ExoPlayer picks by bandwidth estimate, so the two platforms would show different
+     * files for the same artist.
+     */
+    private suspend fun AMEditorialVideo.toArtistMotion(): ArtistMotion? {
+        val square = motionArtistSquare1x1
+        val wide = motionArtistWide16x9 ?: motionArtistFullscreen16x9
+        if (square?.video == null && wide?.video == null) return null
+        return ArtistMotion(
+            squareVideoUrl = square?.video?.let { resolveAMRendition(it) },
+            squareThumbUrl = square?.previewFrame?.toPreviewFrameUrl(),
+            wideVideoUrl = wide?.video?.let { resolveAMRendition(it) },
+            wideThumbUrl = wide?.previewFrame?.toPreviewFrameUrl(),
+        )
+    }
+
+    /** Falls back to the master, which still plays — just not as cheaply. */
+    private suspend fun resolveAMRendition(master: String): String =
+        appleMusic
+            .selectAMRendition(master, AM_MIN_RENDITION_WIDTH)
+            .getOrNull() ?: master
+
+}
+
+private const val LYRICS_TAG = "Lyrics"
+
+private const val UNAUTHORIZED = "unauthorized"
+
+/** How long a "no lyrics anywhere" verdict stops the chain from asking again. */
+private const val LYRICS_MISS_TTL_SECS = 24 * 3600L
+
+/** How far apart the chain starts its providers. A first answer takes ~0.4-0.7s (desktop, timed). */
+private const val LYRICS_STAGGER_MS = 300L
+
+/** The most one provider may take in the chain; in-order reading means a stalled one holds the rest. */
+private const val LYRICS_PROVIDER_BUDGET_MS = 10_000L
+
+private const val AM_ARTWORK_TAG = "AMArtwork"
+private const val AM_SEARCH_LIMIT = 5
+
+// Narrowest animated-artwork rendition considered sharp enough. On the measured ladders this lands
+// on 830x1106 for the tall cut and 768x768 for the square one, both H.264 at roughly 2-3 Mbps.
+private const val AM_MIN_RENDITION_WIDTH = 720
+
+/** [matchScore] tier for an exact name match. */
+private const val EXACT_NAME_TIER = 0
+
+/**
+ * How far two running times may differ and still be the same recording. Wide enough to absorb the
+ * encoding differences between YouTube and Apple, far narrower than the gap between a studio take
+ * and a live one.
+ */
+private const val AM_DURATION_TOLERANCE_SECONDS = 3
+// Only used when AM omits the preview frame's own dimensions, which it normally supplies.
+private const val AM_PREVIEW_FRAME_SIZE = 1080
+
+/** The name-logo is served far larger than any header needs; ~1000px wide is plenty. */
+private const val AM_LOGO_TARGET_WIDTH = 1000
+
+/**
+ * The url is a `{w}x{h}` template and the frame carries its own dimensions — an artist's wide cut
+ * is 3840x2160, not square — so asking for a square crop of it would squash the image.
+ */
+private fun AMArtwork.toPreviewFrameUrl(): String? =
+    toImageUrl(
+        width = width ?: AM_PREVIEW_FRAME_SIZE,
+        height = height ?: AM_PREVIEW_FRAME_SIZE,
+    )
+
+// The album name YouTube Music rows fall back to when the real one is unknown. Declared here for
+// the same reason the DAO and the local data source each declare their own: it is a value this
+// file has to recognise, not one it shares.
+private const val PLACEHOLDER_ALBUM_NAME = "Album"
+
+/**
+ * The query cleaning the Spotify canvas search applies before it hits the network — featured-artist
+ * markers, the conjunctions that join two artists, and the punctuation that survives them. Kept
+ * character-for-character identical to that chain so both sources search for the same thing.
+ */
+private fun String.cleanForSearch(): String =
+    this
+        .replace(
+            Regex("\\((feat\\.|ft.|cùng với|con|mukana|com|avec|合作音乐人: ) "),
+            " ",
+        ).replace(
+            Regex("( và | & | и | e | und |, |和| dan)"),
+            " ",
+        ).replace("  ", " ")
+        .replace(Regex("([()])"), "")
+        .replace(".", " ")
+        .replace("  ", " ")
+
+/**
+ * Lowercase, and reduce anything that is not a letter or a digit to a single space. Deliberately
+ * built on [Char.isLetterOrDigit] rather than an `[^a-z0-9]` character class: that class treats
+ * every accented letter as punctuation, which would grind "Hoàng Thùy Linh" down to "ho ng th y
+ * linh" and make the comparison below meaningless for most of the languages this app serves.
+ */
+private fun String.normalizeForMatch(): String =
+    lowercase()
+        .map { if (it.isLetterOrDigit()) it else ' ' }
+        .joinToString("")
+        .split(' ')
+        .filter { it.isNotEmpty() }
+        .joinToString(" ")
+
+/**
+ * Comparison key. Falls back to the raw lowercased text when normalising leaves nothing behind,
+ * which is exactly what happens to an album titled with a symbol: Ed Sheeran's "÷" and "=" contain
+ * no letters or digits at all, reduce to an empty string, and would otherwise match nothing.
+ */
+private fun String.matchKey(): String = normalizeForMatch().ifEmpty { trim().lowercase() }
+
+private fun String.matchesLoosely(other: String): Boolean {
+    val a = matchKey()
+    val b = other.matchKey()
+    if (a.isEmpty() || b.isEmpty()) return false
+    return a.contains(b) || b.contains(a)
+}
+
+/**
+ * How closely an album name answers the name that was searched for — lower is better, null means
+ * it is not that album at all.
+ *
+ * AM's search cannot be told to sort, and its own ranking puts reissues above the plain edition:
+ * "Hybrid Theory (Deluxe Edition)" ranks above "Hybrid Theory", "1989 (Taylor's Version) [Deluxe]"
+ * above "1989". Taking the first loose match therefore returns the artwork of a *different edition*
+ * of the right album. Ranking by how much text the candidate adds picks the plain one back out.
+ */
+private fun matchScore(
+    candidate: String,
+    subject: String,
+): Pair<Int, Int>? {
+    val c = candidate.matchKey()
+    val s = subject.matchKey()
+    if (c.isEmpty() || s.isEmpty()) return null
+    return when {
+        c == s -> 0 to 0
+        // The subject plus a suffix — "<album> (Deluxe Edition)". The shorter the addition, the
+        // closer the edition is to the one being played.
+        c.startsWith(s) -> 1 to (c.length - s.length)
+        c.contains(s) -> 2 to (c.length - s.length)
+        s.contains(c) -> 3 to (s.length - c.length)
+        else -> null
+    }
+}
+
+private data class ScoredMatch(
+    val tier: Int,
+    val extraLength: Int,
+    val demoted: Int,
+    val rank: Int,
+)
+
+/**
+ * Rank by how closely a name answers [subject] and return the best, or null when nothing is that
+ * thing at all.
+ *
+ * [demote] is consulted only AFTER name closeness, never before it — lower sorts first. Ordering
+ * those the other way round is what made a track pick up the wrong recording: filtering to "has
+ * artwork" first threw away the studio version and left the live one, which then won by default.
+ */
+private fun <T> List<T>.bestNameMatch(
+    subject: String,
+    demote: (T) -> Int = { 0 },
+    nameOf: (T) -> String?,
+): T? =
+    mapIndexedNotNull { rank, item ->
+        matchScore(nameOf(item).orEmpty(), subject)?.let { (tier, extra) ->
+            ScoredMatch(tier, extra, demote(item), rank) to item
+        }
+    }.minWithOrNull(
+        compareBy(
+            { it.first.tier },
+            { it.first.extraLength },
+            { it.first.demoted },
+            { it.first.rank },
+        ),
+    )?.second
+
+/**
+ * Pick the album by name, and only when the name matches EXACTLY.
+ *
+ * AM's album index is not complete enough to trust a near-miss. Searching "Mắt Nhắm Mắt Mở
+ * HIEUTHUHAI" returns exactly one album — *Mắt Nhắm Mắt Mở (Studio Live Session) - EP* — and not
+ * the album itself, so the best available match was a different release of a different recording,
+ * accepted purely because nothing else was on offer. The track search below finds the real album
+ * for the same track, so anything short of an exact name here defers to it rather than guessing.
+ */
+private fun List<AMAlbumResource>.pickAlbumMatch(
+    subject: String,
+    artist: String,
+): AMAlbumResource? =
+    filter { it.hasAnimatedArtwork() }
+        .filter { it.attributes?.artistName.agreesWith(artist) }
+        .bestNameMatch(subject) { it.attributes?.name }
+        ?.takeIf { matchScore(it.attributes?.name.orEmpty(), subject)?.first == EXACT_NAME_TIER }
+
+/**
+ * Pick the album for a track reached by title.
+ *
+ * The album must be the one the matched TRACK belongs to, which is why the search asks for songs
+ * and carries [AMSongWithAlbum.album] along. Reading an album straight out of the response instead
+ * — "the first one that has artwork" — attaches an unrelated release to the track: for an artist
+ * with exactly one animated release, every song of theirs ends up wearing it. Observed with
+ * HIEUTHUHAI, where a single carrying artwork was served for unrelated tracks.
+ *
+ * The track title is scored too, for the same reason the album name is on the other path: AM's
+ * order is a ranking, not an answer.
+ */
+private fun List<AMSongWithAlbum>.pickSongMatch(
+    title: String,
+    artist: String,
+    durationSeconds: Int,
+    albumHint: String?,
+): AMSongWithAlbum? =
+    filter { it.artistName.agreesWith(artist) }
+        .bestNameMatch(
+            subject = title,
+            // Three tiebreaks, weakest last. The name alone cannot separate a studio take from a
+            // live one when both are titled the same, so RUNNING TIME leads here — it is the same
+            // signal the Spotify canvas search picks its track with, and it separates them
+            // decisively: "Không Thể Say" is 228s, its Live Band cut 188s and its festival cut
+            // 327s. The album name comes next, deciding between the several albums one recording
+            // legitimately appears on. Whether artwork exists at all only breaks what is left.
+            demote = { candidate ->
+                val durationMisses = !candidate.matchesDuration(durationSeconds)
+                val albumName = candidate.album.attributes?.name.orEmpty()
+                val hintMisses = albumHint != null && matchScore(albumName, albumHint)?.first != EXACT_NAME_TIER
+                val hasNoArtwork = !candidate.album.hasAnimatedArtwork()
+                (if (durationMisses) 4 else 0) + (if (hintMisses) 2 else 0) + (if (hasNoArtwork) 1 else 0)
+            },
+        ) { it.songName }
+        ?.takeIf { it.album.hasAnimatedArtwork() }
+
+/**
+ * Whether this is the same recording, by length. Unknown on either side counts as agreement — an
+ * absent number is not evidence of a different take.
+ */
+private fun AMSongWithAlbum.matchesDuration(durationSeconds: Int): Boolean {
+    val theirs = durationInMillis ?: return true
+    if (durationSeconds <= 0) return true
+    return abs(theirs / 1000L - durationSeconds) <= AM_DURATION_TOLERANCE_SECONDS
+}
+
+/**
+ * Whether a credited name is the artist being played. Blank means the row carried no artist at all,
+ * which cannot disagree with anything.
+ */
+private fun String?.agreesWith(artist: String): Boolean =
+    artist.isBlank() || (this != null && this.matchesLoosely(artist))
+
+private fun AMAlbumResource.hasAnimatedArtwork(): Boolean =
+    attributes
+        ?.editorialVideo
+        ?.preferredRendition()
+        ?.video != null
+
+/**
+ * Every album that has animated artwork ships all four renditions, but they are read defensively
+ * anyway. The tall cut is preferred because the canvas slot it lands in is a full-height backdrop,
+ * which is what the Spotify canvas it replaces was shaped for.
+ */
+private fun AMEditorialVideo.preferredRendition(): AMMotionVideo? =
+    listOfNotNull(motionDetailTall, motionTallVideo3x4, motionDetailSquare, motionSquareVideo1x1)
+        .firstOrNull { it.video != null }

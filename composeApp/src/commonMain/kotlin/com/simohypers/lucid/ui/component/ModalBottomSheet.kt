@@ -1,0 +1,2504 @@
+package com.simohypers.lucid.ui.component
+
+import com.simohypers.lucid.viewModel.PlaylistRemoval
+import lucid.composeapp.generated.resources.remove_from_named_playlist
+import kotlin.time.Clock
+import kotlin.time.Duration.Companion.minutes
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toLocalDateTime
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import lucid.composeapp.generated.resources.sleep_timer_hint
+import lucid.composeapp.generated.resources.sleep_timer_minutes
+import lucid.composeapp.generated.resources.sleep_timer_hour
+import lucid.composeapp.generated.resources.sleep_timer_end
+import lucid.composeapp.generated.resources.sleep_timer_custom
+import lucid.composeapp.generated.resources.sleep_timer_start
+import lucid.composeapp.generated.resources.sleep_timer_left
+import lucid.composeapp.generated.resources.sleep_timer_after_song
+import lucid.composeapp.generated.resources.sleep_timer_pauses_at
+import lucid.composeapp.generated.resources.sleep_timer_add_ten
+import lucid.composeapp.generated.resources.sleep_timer_turn_off
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.ui.draw.rotate
+import androidx.compose.runtime.produceState
+import com.simohypers.lucid.ui.icon.ArrowForwardIos
+import lucid.composeapp.generated.resources.go_to_artist
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.IntrinsicSize
+import com.simohypers.lucid.ui.theme.rounded
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.MarqueeAnimationMode
+import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.exclude
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AlertDialogDefaults
+import androidx.compose.material3.BasicAlertDialog
+import androidx.compose.material3.BottomSheetDefaults
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.unit.LayoutDirection
+import com.simohypers.lucid.extension.parseTimestampToMilliseconds
+import com.simohypers.lucid.viewModel.UIEvent
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.navigation.NavController
+import coil3.compose.AsyncImage
+import coil3.compose.LocalPlatformContext
+import coil3.request.CachePolicy
+import coil3.request.ImageRequest
+import coil3.request.crossfade
+import com.simohypers.lucid.domain.data.entities.DownloadState
+import com.simohypers.lucid.domain.data.entities.LocalPlaylistEntity
+import com.simohypers.lucid.domain.data.entities.SongEntity
+import com.simohypers.lucid.domain.data.model.download.DownloadProgress
+import com.simohypers.lucid.domain.data.model.searchResult.playlists.PlaylistsResult
+import com.simohypers.lucid.domain.data.model.searchResult.songs.Artist
+import com.simohypers.lucid.domain.manager.DataStoreManager
+import com.simohypers.lucid.domain.mediaservice.handler.MediaPlayerHandler
+import com.simohypers.lucid.domain.utils.connectArtists
+import com.simohypers.lucid.domain.utils.toListName
+import com.simohypers.lucid.expect.copyToClipboard
+import com.simohypers.lucid.expect.shareUrl
+import com.simohypers.lucid.extension.greyScale
+import com.simohypers.lucid.ui.icon.AccessAlarm
+import com.simohypers.lucid.ui.icon.Add
+import com.simohypers.lucid.ui.icon.AddCircleOutline
+import com.simohypers.lucid.ui.icon.Album
+import com.simohypers.lucid.ui.icon.CheckCircle
+import com.simohypers.lucid.ui.icon.Close
+import com.simohypers.lucid.ui.icon.ContentCopy
+import com.simohypers.lucid.ui.icon.Delete
+import com.simohypers.lucid.ui.icon.Download
+import com.simohypers.lucid.ui.icon.Error
+import com.simohypers.lucid.ui.icon.KeyboardArrowDown
+import com.simohypers.lucid.ui.icon.Done
+import com.simohypers.lucid.ui.icon.DownloadForOffline
+import com.simohypers.lucid.ui.icon.DownloadForOfflineOutlined
+import com.simohypers.lucid.ui.icon.Downloading
+import com.simohypers.lucid.ui.icon.Edit
+import com.simohypers.lucid.ui.icon.FavoriteBorder
+import com.simohypers.lucid.ui.icon.GridView
+import com.simohypers.lucid.ui.icon.Info
+import com.simohypers.lucid.ui.icon.PeopleAlt
+import com.simohypers.lucid.ui.icon.PlayArrow
+import com.simohypers.lucid.ui.icon.PlayCircle
+import com.simohypers.lucid.ui.icon.PlaylistAdd
+import com.simohypers.lucid.ui.icon.QueueMusic
+import com.simohypers.lucid.ui.icon.Remove
+import com.simohypers.lucid.ui.icon.Search
+import com.simohypers.lucid.ui.icon.Sensors
+import com.simohypers.lucid.ui.icon.Check
+import com.simohypers.lucid.ui.icon.PersonAdd
+import com.simohypers.lucid.ui.icon.Share
+import com.simohypers.lucid.ui.icon.Shuffle
+import com.simohypers.lucid.ui.icon.SelectAll
+import com.simohypers.lucid.ui.icon.LucidIcons
+import com.simohypers.lucid.ui.icon.SkipNext
+import com.simohypers.lucid.ui.icon.Speed
+import com.simohypers.lucid.ui.icon.Sync
+import com.simohypers.lucid.ui.icon.Tune
+import com.simohypers.lucid.ui.icon.ThumbDown
+import com.simohypers.lucid.ui.icon.ThumbDownOutlined
+import com.simohypers.lucid.ui.navigation.destination.list.AlbumDestination
+import com.simohypers.lucid.ui.navigation.destination.list.ArtistDestination
+import com.simohypers.lucid.ui.theme.AppThemeContent
+import com.simohypers.lucid.ui.theme.seed
+import com.simohypers.lucid.ui.theme.typo
+import com.simohypers.lucid.viewModel.NowPlayingBottomSheetUIEvent
+import com.simohypers.lucid.viewModel.NowPlayingBottomSheetViewModel
+import com.simohypers.lucid.viewModel.SharedViewModel
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import multiplatform.network.cmptoast.ToastGravity
+import multiplatform.network.cmptoast.showToast
+import org.jetbrains.compose.resources.StringResource
+import org.jetbrains.compose.resources.getString
+import org.jetbrains.compose.resources.painterResource
+import org.jetbrains.compose.resources.pluralStringResource
+import org.jetbrains.compose.resources.stringResource
+import lucid.composeapp.generated.resources.download_kept_note
+import org.koin.compose.koinInject
+import org.koin.compose.viewmodel.koinViewModel
+import lucid.composeapp.generated.resources.Res
+import lucid.composeapp.generated.resources.liked_songs_count
+import lucid.composeapp.generated.resources.add_to_a_playlist
+import lucid.composeapp.generated.resources.download_missing
+import lucid.composeapp.generated.resources.download_missing_rereads
+import lucid.composeapp.generated.resources.download_progress_text
+import lucid.composeapp.generated.resources.download_refused
+import lucid.composeapp.generated.resources.failed_downloads
+import lucid.composeapp.generated.resources.failed_downloads_reason
+import lucid.composeapp.generated.resources.remove_download
+import lucid.composeapp.generated.resources.tap_again_to_remove
+import androidx.compose.material3.LinearProgressIndicator
+import com.simohypers.lucid.domain.data.model.download.CollectionDownload
+import lucid.composeapp.generated.resources.add_to_queue
+import lucid.composeapp.generated.resources.about
+import lucid.composeapp.generated.resources.album
+import lucid.composeapp.generated.resources.go_to_album
+import lucid.composeapp.generated.resources.artists
+import lucid.composeapp.generated.resources.baseline_favorite_24
+import lucid.composeapp.generated.resources.bitrate
+import lucid.composeapp.generated.resources.bpm
+import lucid.composeapp.generated.resources.can_not_be_empty
+import lucid.composeapp.generated.resources.cancel
+import lucid.composeapp.generated.resources.codec
+import lucid.composeapp.generated.resources.copied_to_clipboard
+import lucid.composeapp.generated.resources.delete
+import lucid.composeapp.generated.resources.dislike
+import lucid.composeapp.generated.resources.remove_dislike
+import lucid.composeapp.generated.resources.delete_from_queue
+import lucid.composeapp.generated.resources.delete_playlist
+import lucid.composeapp.generated.resources.delete_song_from_playlist
+import lucid.composeapp.generated.resources.download
+import lucid.composeapp.generated.resources.download_speed
+import lucid.composeapp.generated.resources.download_this_song_video_file_to_your_device
+import lucid.composeapp.generated.resources.downloaded
+import lucid.composeapp.generated.resources.downloading
+import lucid.composeapp.generated.resources.downloading_audio
+import lucid.composeapp.generated.resources.downloading_video
+import lucid.composeapp.generated.resources.edit_playlist
+import lucid.composeapp.generated.resources.error_occurred
+import lucid.composeapp.generated.resources.itag
+import lucid.composeapp.generated.resources.key
+import lucid.composeapp.generated.resources.like
+import lucid.composeapp.generated.resources.liked
+import lucid.composeapp.generated.resources.list_all_cookies_of_this_page
+import lucid.composeapp.generated.resources.merging_audio_and_video
+import lucid.composeapp.generated.resources.move_to_play_next
+import lucid.composeapp.generated.resources.no_album
+import lucid.composeapp.generated.resources.new_playlist
+import lucid.composeapp.generated.resources.no_results_found
+import lucid.composeapp.generated.resources.ok
+import lucid.composeapp.generated.resources.pitch
+import lucid.composeapp.generated.resources.play
+import lucid.composeapp.generated.resources.play_next
+import lucid.composeapp.generated.resources.playback_speed
+import lucid.composeapp.generated.resources.playback_speed_pitch
+import lucid.composeapp.generated.resources.playback_speed_pitch_disabled
+import lucid.composeapp.generated.resources.processing
+import lucid.composeapp.generated.resources.queue
+import lucid.composeapp.generated.resources.radio
+import lucid.composeapp.generated.resources.remove_shortcut
+import lucid.composeapp.generated.resources.add_to_shortcuts
+import lucid.composeapp.generated.resources.unfollow
+import lucid.composeapp.generated.resources.follow
+import lucid.composeapp.generated.resources.save_to_playlist
+import lucid.composeapp.generated.resources.search
+import lucid.composeapp.generated.resources.set
+import lucid.composeapp.generated.resources.select_tracks
+import lucid.composeapp.generated.resources.share
+import lucid.composeapp.generated.resources.shuffle_play
+import lucid.composeapp.generated.resources.sleep_minutes
+import lucid.composeapp.generated.resources.sleep_timer
+import lucid.composeapp.generated.resources.sleep_timer_end_of_song
+import lucid.composeapp.generated.resources.sleep_timer_off
+import lucid.composeapp.generated.resources.sleep_timer_set_error
+import lucid.composeapp.generated.resources.sleep_timer_warning
+import lucid.composeapp.generated.resources.song_info
+import lucid.composeapp.generated.resources.song_info_likes
+import lucid.composeapp.generated.resources.song_info_loudness
+import lucid.composeapp.generated.resources.song_info_plays
+import lucid.composeapp.generated.resources.song_info_sample_rate
+import lucid.composeapp.generated.resources.song_info_size
+import lucid.composeapp.generated.resources.song_info_source
+import lucid.composeapp.generated.resources.song_info_stream
+import lucid.composeapp.generated.resources.song_info_uploaded
+import lucid.composeapp.generated.resources.sort_by
+import lucid.composeapp.generated.resources.start_radio
+import lucid.composeapp.generated.resources.to_download_folder
+import lucid.composeapp.generated.resources.warning
+import lucid.composeapp.generated.resources.yes
+import lucid.composeapp.generated.resources.your_playlists
+import lucid.composeapp.generated.resources.your_youtube_cookie
+import lucid.composeapp.generated.resources.your_youtube_playlists
+import lucid.composeapp.generated.resources.youtube_url
+import com.simohypers.lucid.domain.utils.withoutYouTubeTwins
+import com.simohypers.lucid.ui.icon.Cloud
+import lucid.composeapp.generated.resources.move_to_youtube_music
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sentinel value used by SleepTimerBottomSheet to signal "end of current song"
+// Handle this in NowPlayingBottomSheetViewModel / SharedViewModel:
+//   if (minutes == END_OF_SONG_SENTINEL) → stop after current track finishes
+// ─────────────────────────────────────────────────────────────────────────────
+const val END_OF_SONG_SENTINEL = Int.MAX_VALUE
+
+@ExperimentalMaterial3Api
+@Composable
+fun InfoPlayerBottomSheet(
+    onDismiss: () -> Unit,
+    sharedViewModel: SharedViewModel = koinInject(),
+) {
+    AppThemeContent {
+        val sheetState =
+            rememberModalBottomSheetState(
+                skipPartiallyExpanded = true,
+            )
+
+        val screenDataState by sharedViewModel.nowPlayingScreenData.collectAsStateWithLifecycle()
+        val songEntity by sharedViewModel.nowPlayingState.map { it?.songEntity }.collectAsState(null)
+        val format by sharedViewModel.format.collectAsState(null)
+        val extractSource by sharedViewModel.extractSource.collectAsState()
+        val downloadProgress by sharedViewModel.downloadFileProgress.collectAsStateWithLifecycle()
+        val timeline by sharedViewModel.timeline.collectAsStateWithLifecycle()
+        val uriHandler = LocalUriHandler.current
+
+        ModalBottomSheet(
+            onDismissRequest = onDismiss,
+            sheetState = sheetState,
+            containerColor = Color.Transparent,
+            contentColor = Color.Transparent,
+            dragHandle = null,
+            scrimColor = Color.Black.copy(alpha = .5f),
+            contentWindowInsets = { WindowInsets(0, 0, 0, 0) },
+        ) {
+            // This dialog MUST stay inside the sheet's content lambda. A Dialog is its own window
+            // (Android ComponentDialog) / scene layer (skiko), so nothing in the layout tree orders
+            // it — the layer attached LAST wins, and DisposableEffects attach in composition order.
+            // Written as a sibling BEFORE ModalBottomSheet it lost to the sheet whenever both entered
+            // composition in the same pass: reopening the sheet mid-download, or an Android config
+            // change (downloadProgress lives in the ViewModel, so it survives this composable leaving).
+            // Nested here, the sheet's layer necessarily exists first, so the dialog is always on top.
+            if (downloadProgress != DownloadProgress.INIT) {
+                BasicAlertDialog(
+                    onDismissRequest = { },
+                    modifier = Modifier.wrapContentSize(),
+                ) {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.large,
+                        color = rememberSurfaceDarkColors().container,
+                        tonalElevation = AlertDialogDefaults.TonalElevation,
+                        shadowElevation = 1.dp,
+                    ) {
+                        Column(
+                            Modifier.padding(
+                                horizontal = 20.dp,
+                                vertical = 20.dp,
+                            ),
+                        ) {
+                            Text(
+                                stringResource(Res.string.downloading),
+                                style = typo().headlineMedium,
+                            )
+                            Row(Modifier.padding(top = 20.dp), verticalAlignment = Alignment.CenterVertically) {
+                                if (!downloadProgress.isDone && !downloadProgress.isError) {
+                                    LucidLoader(Modifier.size(40.dp))
+                                    Spacer(Modifier.size(15.dp))
+                                }
+                                Crossfade(downloadProgress) {
+                                    if (it.isMerging) {
+                                        Text(
+                                            text = stringResource(Res.string.merging_audio_and_video),
+                                            modifier = Modifier.padding(vertical = 5.dp),
+                                            style = typo().bodyMedium,
+                                        )
+                                    } else if (it.isError) {
+                                        Column {
+                                            Text(
+                                                text = stringResource(Res.string.error_occurred),
+                                                modifier = Modifier.padding(vertical = 5.dp),
+                                                style = typo().bodyMedium,
+                                            )
+                                            Text(
+                                                text = downloadProgress.errorMessage,
+                                                modifier = Modifier.padding(bottom = 5.dp),
+                                                maxLines = 2,
+                                                style = typo().bodyMedium,
+                                            )
+                                        }
+                                    } else if (it.isDone) {
+                                        Text(
+                                            text =
+                                                stringResource(Res.string.downloaded) +
+                                                    stringResource(Res.string.to_download_folder)
+                                                        .replace("\"", ""),
+                                            modifier = Modifier.padding(vertical = 5.dp),
+                                            style = typo().bodyMedium,
+                                        )
+                                    } else {
+                                        Column {
+                                            if (it.audioDownloadProgress != 0f) {
+                                                Text(
+                                                    text =
+                                                        stringResource(
+                                                            Res.string.downloading_audio,
+                                                            (downloadProgress.audioDownloadProgress * 100).toString() + "%",
+                                                        ),
+                                                    modifier = Modifier.padding(vertical = 5.dp),
+                                                    style = typo().bodyMedium,
+                                                )
+                                            }
+                                            if (it.videoDownloadProgress != 0f) {
+                                                Text(
+                                                    text =
+                                                        stringResource(
+                                                            Res.string.downloading_video,
+                                                            (downloadProgress.videoDownloadProgress * 100).toString() + "%",
+                                                        ),
+                                                    modifier = Modifier.padding(vertical = 5.dp),
+                                                    style = typo().bodyMedium,
+                                                )
+                                            }
+                                            if (downloadProgress.downloadSpeed != 0) {
+                                                Text(
+                                                    text =
+                                                        stringResource(
+                                                            Res.string.download_speed,
+                                                            downloadProgress.downloadSpeed.toString() + " kb/s",
+                                                        ),
+                                                    modifier = Modifier.padding(vertical = 5.dp),
+                                                    style = typo().bodyMedium,
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Crossfade(downloadProgress) {
+                                if (it.isError) {
+                                    Column {
+                                        Spacer(Modifier.height(10.dp))
+                                        OutlinedButton(onClick = {
+                                            sharedViewModel.downloadFileDone()
+                                        }) { Text(stringResource(Res.string.ok)) }
+                                    }
+                                }
+                                if (it.isDone) {
+                                    Column {
+                                        Spacer(Modifier.height(10.dp))
+                                        OutlinedButton(onClick = {
+                                            sharedViewModel.downloadFileDone()
+                                        }) { Text(stringResource(Res.string.ok)) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Rows with nothing to show are left out: BPM and key only come with Tidal streams, likes never.
+            val info = screenDataState.songInfoData
+            val about =
+                listOfNotNull(
+                    info?.viewCount?.let { stringResource(Res.string.song_info_plays) to "%,d".format(it) },
+                    info?.like?.let { stringResource(Res.string.song_info_likes) to "%,d".format(it) },
+                    info?.uploadDate?.takeIf { it.isNotBlank() }?.let { stringResource(Res.string.song_info_uploaded) to it },
+                )
+            val stream =
+                listOfNotNull(
+                    format?.codecs?.takeIf { it.isNotBlank() }?.let { stringResource(Res.string.codec) to it },
+                    format?.bitrate?.let { stringResource(Res.string.bitrate) to "${it / 1000} kbps" },
+                    format?.sampleRate?.let { stringResource(Res.string.song_info_sample_rate) to "${it / 1000.0}".removeSuffix(".0") + " kHz" },
+                    format?.contentLength?.let { stringResource(Res.string.song_info_size) to "%.1f MB".format(it / 1_048_576.0) },
+                    format?.loudnessDb?.let { stringResource(Res.string.song_info_loudness) to "%.1f dB".format(it) },
+                    format?.bpm?.let { stringResource(Res.string.bpm) to it.toString() },
+                    listOfNotNull(format?.musicKey, format?.keyScale).joinToString(" ").takeIf { it.isNotBlank() }?.let {
+                        stringResource(Res.string.key) to it
+                    },
+                    format?.itag?.let { stringResource(Res.string.itag) to it.toString() },
+                    extractSource?.let { stringResource(Res.string.song_info_source) to it },
+                )
+            val url = "https://music.youtube.com/watch?v=${songEntity?.videoId}"
+
+            Card(
+                modifier =
+                    Modifier
+                        .padding(top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding())
+                        .fillMaxWidth()
+                        .wrapContentHeight(),
+                // Lucid's sheet corner, on the card colour its desktop menus use.
+                shape = rounded(topStart = 20.dp, topEnd = 20.dp),
+                colors = CardDefaults.cardColors().copy(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+            ) {
+                Column(
+                    modifier =
+                        Modifier
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 16.dp),
+                ) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Card(
+                        modifier =
+                            Modifier
+                                .align(Alignment.CenterHorizontally)
+                                .width(32.dp)
+                                .height(4.dp),
+                        colors = CardDefaults.cardColors().copy(containerColor = rememberSurfaceDarkColors().handle),
+                        shape = RoundedCornerShape(50),
+                    ) {}
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 18.dp, start = 4.dp, end = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        val thumb = screenDataState.thumbnailURL
+                        AsyncImage(
+                            model =
+                                ImageRequest
+                                    .Builder(LocalPlatformContext.current)
+                                    .data(thumb)
+                                    .diskCachePolicy(CachePolicy.ENABLED)
+                                    .diskCacheKey(thumb)
+                                    .crossfade(550)
+                                    .build(),
+                            placeholder = rememberHolderPainter(),
+                            error = rememberHolderPainter(),
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier =
+                                Modifier
+                                    .size(72.dp)
+                                    .clip(MaterialTheme.shapes.small),
+                        )
+                        Spacer(modifier = Modifier.width(14.dp))
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                text = screenDataState.nowPlayingTitle,
+                                style = typo().titleMedium,
+                                color = rememberSurfaceDarkColors().content,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = screenDataState.artistName,
+                                style = typo().bodyMedium,
+                                color = rememberSurfaceDarkColors().subtitle,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            songEntity?.albumName?.takeIf { it.isNotBlank() }?.let {
+                                Text(
+                                    text = it,
+                                    style = typo().bodySmall,
+                                    color = rememberSurfaceDarkColors().subtitle,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+
+                    if (about.isNotEmpty()) {
+                        SettingGroup(title = stringResource(Res.string.about)) {
+                            about.forEach { (label, value) -> InfoRow(label, value) }
+                        }
+                    }
+                    info?.description?.takeIf { it.isNotBlank() }?.let { description ->
+                        DescriptionView(
+                            text = description,
+                            limitLine = 2,
+                            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp),
+                            onTimeClicked = { raw ->
+                                val timestamp = parseTimestampToMilliseconds(raw)
+                                if (timestamp != 0.0 && timestamp < timeline.total) {
+                                    sharedViewModel.onUIEvent(UIEvent.UpdateProgress(((timestamp * 100) / timeline.total).toFloat()))
+                                }
+                            },
+                            onURLClicked = { uriHandler.openUri(it) },
+                        )
+                    }
+                    if (stream.isNotEmpty()) {
+                        SettingGroup(title = stringResource(Res.string.song_info_stream)) {
+                            stream.forEach { (label, value) -> InfoRow(label, value) }
+                        }
+                    }
+
+                    if (songEntity?.videoId != null) {
+                        SettingGroup(title = null) {
+                            Row(
+                                modifier =
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .clickable { uriHandler.openUri(url) }
+                                        .padding(start = 16.dp, end = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = url.removePrefix("https://"),
+                                    style = typo().bodyMedium,
+                                    color = rememberSurfaceDarkColors().content,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                // ponytail: no toast, Android 13+ shows its own clipboard confirmation.
+                                IconButton(onClick = { copyToClipboard("YouTube URL", url) }) {
+                                    Icon(
+                                        imageVector = LucidIcons.ContentCopy,
+                                        contentDescription = stringResource(Res.string.youtube_url),
+                                        tint = rememberSurfaceDarkColors().subtitle,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    OutlinedButton(
+                        enabled = screenDataState.bitmap != null,
+                        onClick = {
+                            sharedViewModel.downloadFile(
+                                bitmap = screenDataState.bitmap ?: return@OutlinedButton,
+                            )
+                        },
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(top = 16.dp, bottom = 8.dp),
+                    ) {
+                        Text(text = stringResource(Res.string.download_this_song_video_file_to_your_device))
+                    }
+
+                    EndOfModalBottomSheet()
+                }
+            }
+        }
+    }
+}
+
+/** A label and its value on one line of a [SettingGroup] card, with the hairline [SettingItem] rows draw. */
+@Composable
+private fun InfoRow(
+    label: String,
+    value: String,
+) {
+    val dividerColor = MaterialTheme.colorScheme.outlineVariant
+    Row(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .drawBehind {
+                    val thickness = 0.5.dp.toPx()
+                    val inset = 16.dp.toPx()
+                    val rtl = layoutDirection == LayoutDirection.Rtl
+                    drawLine(
+                        color = dividerColor,
+                        start = Offset(if (rtl) 0f else inset, thickness / 2),
+                        end = Offset(if (rtl) size.width - inset else size.width, thickness / 2),
+                        strokeWidth = thickness,
+                    )
+                }.padding(horizontal = 16.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            style = typo().bodyMedium,
+            color = rememberSurfaceDarkColors().subtitle,
+        )
+        Text(
+            text = value,
+            style = typo().bodyMedium,
+            color = rememberSurfaceDarkColors().content,
+            textAlign = TextAlign.End,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/** A queue row a song sheet was opened from: its position, and the track that sat there then. */
+data class QueuePosition(
+    val index: Int,
+    val videoId: String,
+)
+
+/**
+ * The rows only a queue track has: move it to play next, or take it out of the queue.
+ *
+ * They act by POSITION, and a radio trims its played history off the front while the sheet can be
+ * open, which moves every row. If the track is no longer at its position they do nothing rather
+ * than move or delete whatever slid into its place.
+ */
+@Composable
+private fun QueueItemActions(
+    position: QueuePosition,
+    onDone: () -> Unit,
+    musicServiceHandler: MediaPlayerHandler = koinInject<MediaPlayerHandler>(),
+) {
+    val coroutineScope = rememberCoroutineScope()
+    val index = position.index
+    val current = musicServiceHandler.currentOrderIndex()
+    val act: (suspend () -> Unit) -> Unit = { action ->
+        val stillThere =
+            musicServiceHandler.queueData.value
+                ?.data
+                ?.listTracks
+                ?.getOrNull(index)
+                ?.videoId == position.videoId
+        if (stillThere) coroutineScope.launch { action() }
+        onDone()
+    }
+    // Hidden on the playing track and on the one already next: there is nowhere to move them.
+    if (current >= 0 && index != current && index != current + 1) {
+        ActionButton(icon = LucidIcons.SkipNext, text = Res.string.move_to_play_next) {
+            act { musicServiceHandler.moveItemToPlayNext(index) }
+        }
+    }
+    ActionButton(icon = LucidIcons.Delete, text = Res.string.delete_from_queue) {
+        act { musicServiceHandler.removeMediaItem(index) }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@Composable
+fun NowPlayingBottomSheet(
+    onDismiss: () -> Unit,
+    navController: NavController,
+    song: SongEntity?,
+    viewModel: NowPlayingBottomSheetViewModel = koinViewModel(),
+    setSleepTimerEnable: Boolean = false,
+    onNavigateToOtherScreen: () -> Unit = {},
+    onDelete: (() -> Unit)? = null,
+    onLibraryDelete: (() -> Unit)? = null,
+    /** Set when opened from a queue row: adds its Play next and Remove from queue rows under the tiles. */
+    queuePosition: QueuePosition? = null,
+    dataStoreManager: DataStoreManager = koinInject<DataStoreManager>(),
+    /** Set from the full player: adds a "Song info" row. */
+    onShowInfo: (() -> Unit)? = null,
+    /** Set when the song sits in a playlist the user can edit: adds Remove from "<playlist>" under Start radio. */
+    fromPlaylist: PlaylistRemoval? = null,
+) {
+    // The menu follows the app theme even when opened from the player or an album page.
+    AppThemeContent {
+        NowPlayingBottomSheetContent(
+            onDismiss, navController, song, viewModel, setSleepTimerEnable, onNavigateToOtherScreen,
+            onDelete, onLibraryDelete, queuePosition, dataStoreManager, onShowInfo, fromPlaylist,
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@Composable
+private fun NowPlayingBottomSheetContent(
+    onDismiss: () -> Unit,
+    navController: NavController,
+    song: SongEntity?,
+    viewModel: NowPlayingBottomSheetViewModel,
+    setSleepTimerEnable: Boolean,
+    onNavigateToOtherScreen: () -> Unit,
+    onDelete: (() -> Unit)?,
+    onLibraryDelete: (() -> Unit)?,
+    queuePosition: QueuePosition?,
+    dataStoreManager: DataStoreManager,
+    onShowInfo: (() -> Unit)?,
+    fromPlaylist: PlaylistRemoval?,
+) {
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val coroutineScope = rememberCoroutineScope()
+    val modelBottomSheetState =
+        rememberModalBottomSheetState(
+            skipPartiallyExpanded = true,
+        )
+    val hideModalBottomSheet: () -> Unit =
+        {
+            coroutineScope.launch {
+                modelBottomSheetState.hide()
+                onDismiss()
+            }
+        }
+
+    var addToAPlaylist by remember { mutableStateOf(false) }
+    var sleepTimer by remember { mutableStateOf(false) }
+    var isBottomSheetVisible by rememberSaveable { mutableStateOf(false) }
+    var changePlaybackSpeedPitch by remember { mutableStateOf(false) }
+    val crossfadeEnabled by dataStoreManager.crossfadeEnabled.collectAsState(DataStoreManager.FALSE)
+
+    LaunchedEffect(uiState) {
+        if (uiState.songUIState.videoId.isNotEmpty() && !isBottomSheetVisible) {
+            isBottomSheetVisible = true
+        }
+    }
+
+    LaunchedEffect(key1 = song) {
+        viewModel.setSongEntity(song)
+    }
+
+    if (changePlaybackSpeedPitch) {
+        val playbackSpeed by dataStoreManager.playbackSpeed.collectAsState(1f)
+        val pitch by dataStoreManager.pitch.collectAsState(0)
+        PlaybackSpeedPitchBottomSheet(
+            onDismiss = { changePlaybackSpeedPitch = false },
+            playbackSpeed = playbackSpeed,
+            pitch = pitch,
+        ) { speed, p ->
+            viewModel.onUIEvent(
+                NowPlayingBottomSheetUIEvent.ChangePlaybackSpeedPitch(
+                    speed = speed,
+                    pitch = p,
+                ),
+            )
+        }
+    }
+
+    if (addToAPlaylist) {
+        AddToPlaylistModalBottomSheet(
+            isBottomSheetVisible = true,
+            listLocalPlaylist = uiState.listLocalPlaylist,
+            listYouTubePlaylist = uiState.listYouTubePlaylist,
+            onDismiss = { addToAPlaylist = false },
+            onClick = {
+                viewModel.onUIEvent(NowPlayingBottomSheetUIEvent.AddToPlaylist(it.id))
+            },
+            onYTPlaylistClick = {
+                viewModel.onUIEvent(NowPlayingBottomSheetUIEvent.AddToYouTubePlaylist(it.browseId))
+            },
+            videoId = uiState.songUIState.videoId,
+        )
+    }
+
+    if (sleepTimer) {
+        SleepTimerBottomSheet(
+            timeRemaining = uiState.sleepTimer.timeRemaining,
+            onDismiss = { sleepTimer = false },
+            onSetTimer = { minutes -> viewModel.onUIEvent(NowPlayingBottomSheetUIEvent.SetSleepTimer(cancel = false, minutes = minutes)) },
+            onTurnOff = { viewModel.onUIEvent(NowPlayingBottomSheetUIEvent.SetSleepTimer(cancel = true)) },
+        )
+    }
+
+    if (isBottomSheetVisible) {
+        ModalBottomSheet(
+            onDismissRequest = onDismiss,
+            sheetState = modelBottomSheetState,
+            containerColor = Color.Transparent,
+            contentColor = Color.Transparent,
+            dragHandle = null,
+            scrimColor = Color.Black.copy(alpha = .5f),
+            contentWindowInsets = { WindowInsets(0, 0, 0, 0) },
+        ) {
+            Card(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .wrapContentHeight(),
+                // Lucid's sheet corner, on the card colour its desktop menus use.
+                shape = rounded(topStart = 20.dp, topEnd = 20.dp),
+                colors = CardDefaults.cardColors().copy(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                ) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Card(
+                        modifier =
+                            Modifier
+                                .width(32.dp)
+                                .height(4.dp),
+                        colors =
+                            CardDefaults.cardColors().copy(
+                                containerColor = rememberSurfaceDarkColors().handle,
+                            ),
+                        shape = RoundedCornerShape(50),
+                    ) {}
+                    Spacer(modifier = Modifier.height(10.dp))
+                    val song = uiState.songUIState
+                    val colors = rememberSurfaceDarkColors()
+                    SongMenuHeader(
+                        thumbnail = song.thumbnails,
+                        title = song.title,
+                        subtitle =
+                            listOfNotNull(
+                                song.listArtists.toListName().connectArtists().takeIf { it.isNotBlank() },
+                                song.album?.name?.takeIf { it.isNotBlank() },
+                            ).joinToString(" • "),
+                        liked = song.liked,
+                        onLike = { viewModel.onUIEvent(NowPlayingBottomSheetUIEvent.ToggleLike) },
+                    )
+                    // What the menu is opened for most of the time, one tap each and no row to find:
+                    // two by two, so every label has the width for one line.
+                    val downloaded = song.downloadState == DownloadState.STATE_DOWNLOADED
+                    val downloading =
+                        song.downloadState == DownloadState.STATE_DOWNLOADING || song.downloadState == DownloadState.STATE_PREPARING
+                    val tiles =
+                        listOfNotNull(
+                            // A queue row is already in the queue: its own rows below move it instead.
+                            QuickAction(LucidIcons.PlayCircle, stringResource(Res.string.play_next)) {
+                                viewModel.onUIEvent(NowPlayingBottomSheetUIEvent.PlayNext)
+                                hideModalBottomSheet()
+                            }.takeIf { queuePosition == null },
+                            QuickAction(LucidIcons.QueueMusic, stringResource(Res.string.add_to_queue)) {
+                                viewModel.onUIEvent(NowPlayingBottomSheetUIEvent.AddToQueue)
+                                hideModalBottomSheet()
+                            }.takeIf { queuePosition == null },
+                            QuickAction(LucidIcons.PlaylistAdd, stringResource(Res.string.save_to_playlist)) {
+                                viewModel.resetPlaylists()
+                                addToAPlaylist = true
+                            },
+                            // Stays open: the tile turning to Downloading is the answer to the tap.
+                            QuickAction(
+                                icon =
+                                    when {
+                                        downloaded -> LucidIcons.DownloadForOffline
+                                        downloading -> LucidIcons.Downloading
+                                        else -> LucidIcons.DownloadForOfflineOutlined
+                                    },
+                                label =
+                                    stringResource(
+                                        when {
+                                            downloaded -> Res.string.downloaded
+                                            downloading -> Res.string.downloading
+                                            else -> Res.string.download
+                                        },
+                                    ),
+                                filled = downloaded,
+                            ) {
+                                viewModel.onUIEvent(NowPlayingBottomSheetUIEvent.Download)
+                            },
+                        )
+                    Column(
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        tiles.chunked(2).forEach { two ->
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                two.forEach { QuickTile(it, Modifier.weight(1f)) }
+                                if (two.size == 1) Spacer(Modifier.weight(1f))
+                            }
+                        }
+                    }
+                    if (queuePosition != null) {
+                        QueueItemActions(position = queuePosition, onDone = hideModalBottomSheet)
+                    }
+                    // Desktop's TrackMenu order from here.
+                    ActionButton(
+                        icon = LucidIcons.Sensors,
+                        text = Res.string.start_radio,
+                    ) {
+                        viewModel.onUIEvent(
+                            NowPlayingBottomSheetUIEvent.StartRadio(
+                                videoId = song.videoId,
+                                name = "\"${song.title}\" ${runBlocking { getString(Res.string.radio) }}",
+                            ),
+                        )
+                        hideModalBottomSheet()
+                    }
+                    // Right under Start radio, with the playlist's name on it.
+                    if (fromPlaylist != null) {
+                        ActionButton(
+                            icon = LucidIcons.Delete,
+                            text = null,
+                            textString = stringResource(Res.string.remove_from_named_playlist, fromPlaylist.name),
+                        ) {
+                            hideModalBottomSheet()
+                            fromPlaylist.onRemove()
+                        }
+                    }
+                    // One linked artist opens straight away; with several the row opens in place and
+                    // lists them under it.
+                    val linkedArtists = song.listArtists.filter { !it.id.isNullOrBlank() }
+                    val goToArtist = { id: String ->
+                        hideModalBottomSheet()
+                        onNavigateToOtherScreen()
+                        navController.navigate(ArtistDestination(channelId = id))
+                    }
+                    var artistsOpen by remember { mutableStateOf(false) }
+                    if (linkedArtists.isNotEmpty()) {
+                        val chevron by animateFloatAsState(if (artistsOpen) -90f else 90f)
+                        ActionButton(
+                            icon = LucidIcons.PeopleAlt,
+                            text = Res.string.go_to_artist,
+                            subtitle = linkedArtists.toListName().connectArtists(),
+                            trailing =
+                                if (linkedArtists.size > 1) {
+                                    {
+                                        Icon(
+                                            LucidIcons.ArrowForwardIos,
+                                            contentDescription = null,
+                                            tint = rememberSurfaceDarkColors().subtitle,
+                                            modifier = Modifier.size(14.dp).rotate(chevron),
+                                        )
+                                    }
+                                } else {
+                                    null
+                                },
+                        ) {
+                            val only = linkedArtists.singleOrNull()?.id
+                            if (only != null) goToArtist(only) else artistsOpen = !artistsOpen
+                        }
+                        AnimatedVisibility(artistsOpen) {
+                            val photos by produceState(emptyMap<String, String?>(), linkedArtists) {
+                                value = viewModel.localArtistPhotos(linkedArtists.mapNotNull { it.id })
+                            }
+                            Column {
+                                linkedArtists.forEach { a ->
+                                    ArtistPickRow(a.name, photos[a.id]) { a.id?.let(goToArtist) }
+                                }
+                            }
+                        }
+                    }
+                    // A track can carry an album id with no title (its row links an album but never
+                    // spells the name out): it still opens, just without the name under the row.
+                    song.album?.id?.let { albumId ->
+                        ActionButton(
+                            icon = LucidIcons.Album,
+                            text = Res.string.go_to_album,
+                            subtitle = song.album.name.takeIf { it.isNotBlank() },
+                        ) {
+                            hideModalBottomSheet()
+                            onNavigateToOtherScreen()
+                            navController.navigate(AlbumDestination(browseId = albumId))
+                        }
+                    }
+                    // A YouTube rating: nothing to send it to while signed out.
+                    if (uiState.loggedIn) {
+                        // Stays open, like desktop's: the thumb filling in is the answer to the tap.
+                        ActionButton(
+                            icon = if (song.disliked) LucidIcons.ThumbDown else LucidIcons.ThumbDownOutlined,
+                            text = if (song.disliked) Res.string.remove_dislike else Res.string.dislike,
+                        ) {
+                            viewModel.onUIEvent(NowPlayingBottomSheetUIEvent.ToggleDislike)
+                        }
+                    }
+                    ActionButton(
+                        icon = LucidIcons.Share,
+                        text = Res.string.share,
+                    ) {
+                        viewModel.onUIEvent(NowPlayingBottomSheetUIEvent.Share)
+                    }
+                    // The player's own rows.
+                    if (setSleepTimerEnable) {
+                        val sleepTimerState = uiState.sleepTimer
+                        // timeRemaining > 0 → countdown mode, -1 → end-of-song mode, 0 → off
+                        val isEndOfSong = sleepTimerState.timeRemaining == -1
+                        val isRunning = sleepTimerState.timeRemaining > 0 || isEndOfSong
+                        if (isRunning) {
+                            val accent = MaterialTheme.colorScheme.primary
+                            ActionButton(
+                                icon = LucidIcons.AccessAlarm,
+                                textString =
+                                    if (isEndOfSong) {
+                                        stringResource(Res.string.sleep_timer_end_of_song)
+                                    } else {
+                                        stringResource(Res.string.sleep_timer, sleepTimerState.timeRemaining.toString())
+                                    },
+                                text = null,
+                                textColor = accent,
+                                iconColor = accent,
+                            ) {
+                                sleepTimer = true
+                            }
+                        } else {
+                            ActionButton(
+                                icon = LucidIcons.AccessAlarm,
+                                text = Res.string.sleep_timer_off,
+                            ) {
+                                sleepTimer = true
+                            }
+                        }
+                        ActionButton(
+                            icon = LucidIcons.Speed,
+                            text =
+                                if (crossfadeEnabled != DataStoreManager.TRUE) {
+                                    Res.string.playback_speed_pitch
+                                } else {
+                                    Res.string.playback_speed_pitch_disabled
+                                },
+                            enable = crossfadeEnabled != DataStoreManager.TRUE,
+                        ) {
+                            changePlaybackSpeedPitch = true
+                        }
+                    }
+                    if (onShowInfo != null) {
+                        ActionButton(icon = LucidIcons.Info, text = Res.string.song_info) {
+                            hideModalBottomSheet()
+                            onShowInfo()
+                        }
+                    }
+                    // Removing comes last, as on desktop, in the error colour.
+                    if (onDelete != null) {
+                        ActionButton(
+                            icon = LucidIcons.Delete,
+                            text = Res.string.delete_song_from_playlist,
+                            textColor = MaterialTheme.colorScheme.error,
+                            iconColor = MaterialTheme.colorScheme.error,
+                        ) {
+                            hideModalBottomSheet()
+                            onDelete.invoke()
+                        }
+                    }
+                    if (onLibraryDelete != null) {
+                        ActionButton(
+                            icon = LucidIcons.Delete,
+                            text = Res.string.delete,
+                            textColor = MaterialTheme.colorScheme.error,
+                            iconColor = MaterialTheme.colorScheme.error,
+                        ) {
+                            hideModalBottomSheet()
+                            onLibraryDelete.invoke()
+                        }
+                    }
+                    EndOfModalBottomSheet()
+                }
+            }
+        }
+    }
+}
+
+/** The song at the top of its menu, with Like as a heart at the right instead of a row. */
+@Composable
+private fun SongMenuHeader(
+    thumbnail: String?,
+    title: String,
+    subtitle: String,
+    // Null: no heart (a collection's download sheet).
+    liked: Boolean?,
+    onLike: () -> Unit = {},
+) {
+    val colors = rememberSurfaceDarkColors()
+    // Flips on the tap; the song's own state catches up once the write lands.
+    var checked by remember(liked) { mutableStateOf(liked == true) }
+    Row(
+        Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 4.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        AsyncImage(
+            model =
+                ImageRequest
+                    .Builder(LocalPlatformContext.current)
+                    .data(thumbnail)
+                    .diskCachePolicy(CachePolicy.ENABLED)
+                    .diskCacheKey(thumbnail)
+                    .crossfade(550)
+                    .build(),
+            placeholder = rememberHolderPainter(),
+            error = rememberHolderPainter(),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.size(52.dp).clip(rounded(10.dp)),
+        )
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+            Text(
+                text = title,
+                style = typo().labelMedium,
+                color = colors.content,
+                maxLines = 1,
+                modifier = Modifier.basicMarquee(animationMode = MarqueeAnimationMode.Immediately).focusable(),
+            )
+            if (subtitle.isNotBlank()) {
+                Text(
+                    text = subtitle,
+                    style = typo().bodySmall,
+                    color = colors.subtitle,
+                    maxLines = 1,
+                    modifier = Modifier.basicMarquee(animationMode = MarqueeAnimationMode.Immediately).focusable(),
+                )
+            }
+        }
+        if (liked != null) {
+            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                HeartCheckBox(size = 28, checked = checked, tint = colors.content) {
+                    checked = !checked
+                    onLike()
+                }
+            }
+        }
+    }
+}
+
+private class QuickAction(
+    val icon: ImageVector,
+    val label: String,
+    // Downloaded: the circle fills with the accent, as a done state.
+    val filled: Boolean = false,
+    val onClick: () -> Unit,
+)
+
+/** One of the song menu's big actions: the icon in an accent-tinted circle, the label beside it. */
+@Composable
+private fun QuickTile(
+    action: QuickAction,
+    modifier: Modifier,
+) {
+    val colors = rememberSurfaceDarkColors()
+    val accent = MaterialTheme.colorScheme.primary
+    Row(
+        modifier
+            .height(56.dp)
+            .clip(rounded(16.dp))
+            .background(colors.content.copy(alpha = 0.06f))
+            .clickable(onClick = action.onClick)
+            .padding(horizontal = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.size(36.dp).clip(CircleShape).background(if (action.filled) accent else accent.copy(alpha = 0.16f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                action.icon,
+                contentDescription = null,
+                tint = if (action.filled) MaterialTheme.colorScheme.onPrimary else accent,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+        Spacer(Modifier.width(10.dp))
+        Text(
+            action.label,
+            style = typo().labelSmall,
+            color = colors.content,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/**
+ * A collection menu's first row, as on desktop: Play, in the accent, with Shuffle play as a round
+ * button at its far end. Laid out like [ActionButton] so the rows below line up with it.
+ */
+@Composable
+fun PlayActionRow(
+    onPlay: () -> Unit,
+    onShufflePlay: () -> Unit,
+) {
+    val accent = MaterialTheme.colorScheme.primary
+    Row(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onPlay).padding(start = 20.dp, end = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Image(
+            imageVector = LucidIcons.PlayArrow,
+            contentDescription = null,
+            modifier = Modifier.wrapContentSize(Alignment.Center).padding(12.dp),
+            colorFilter = ColorFilter.tint(accent),
+        )
+        Text(
+            text = stringResource(Res.string.play),
+            style = typo().labelSmall,
+            color = accent,
+            modifier = Modifier.padding(start = 10.dp).weight(1f),
+        )
+        Box(
+            modifier = Modifier.size(40.dp).clip(CircleShape).background(accent.copy(alpha = 0.14f)).clickable(onClick = onShufflePlay),
+            contentAlignment = Alignment.Center,
+        ) {
+            Image(
+                imageVector = LucidIcons.Shuffle,
+                contentDescription = stringResource(Res.string.shuffle_play),
+                modifier = Modifier.size(20.dp),
+                colorFilter = ColorFilter.tint(accent),
+            )
+        }
+    }
+}
+
+@Composable
+fun ActionButton(
+    icon: ImageVector,
+    text: StringResource?,
+    textString: String? = null,
+    textColor: Color? = null,
+    iconColor: Color = Color.Unspecified,
+    enable: Boolean = true,
+    subtitle: String? = null,
+    // At the row's end, e.g. a chevron for a row that opens in place.
+    trailing: (@Composable () -> Unit)? = null,
+    onClick: () -> Unit,
+) {
+    val c = rememberSurfaceDarkColors()
+    val resolvedIconColor = if (iconColor == Color.Unspecified) c.content else iconColor
+    Box(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .wrapContentHeight(Alignment.CenterVertically)
+                .then(
+                    if (enable) Modifier.clickable { onClick.invoke() } else Modifier.greyScale(),
+                ),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 32.dp),
+        ) {
+            Image(
+                imageVector = icon,
+                contentDescription = if (text != null) stringResource(text) else textString ?: "",
+                modifier =
+                    Modifier
+                        .wrapContentSize(Alignment.Center)
+                        .padding(12.dp),
+                colorFilter =
+                    if (enable) {
+                        ColorFilter.tint(resolvedIconColor)
+                    } else {
+                        ColorFilter.tint(c.disabled)
+                    },
+            )
+            Column(Modifier.weight(1f).padding(start = 10.dp)) {
+                Text(
+                    text = if (text != null) stringResource(text) else textString ?: "",
+                    style = typo().labelSmall,
+                    color = if (enable) textColor ?: c.content else c.disabled,
+                    modifier = Modifier.wrapContentHeight(Alignment.CenterVertically),
+                )
+                if (subtitle != null) {
+                    Text(
+                        text = subtitle,
+                        style = typo().bodySmall,
+                        color = if (enable) c.subtitle else c.disabled,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            trailing?.invoke()
+        }
+    }
+}
+
+@Composable
+fun CheckBoxActionButton(
+    defaultChecked: Boolean,
+    isHeartIcon: Boolean,
+    onChangeListener: (checked: Boolean) -> Unit,
+) {
+    var stateChecked by remember(defaultChecked) { mutableStateOf(defaultChecked) }
+    Box(
+        modifier =
+            Modifier
+                .wrapContentSize(align = Alignment.Center)
+                .clickable {
+                    stateChecked = !stateChecked
+                    onChangeListener(stateChecked)
+                },
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier =
+                Modifier
+                    .padding(horizontal = 20.dp)
+                    .fillMaxWidth(),
+        ) {
+            Box(Modifier.padding(10.dp)) {
+                if (isHeartIcon) {
+                    HeartCheckBox(checked = stateChecked, size = 30)
+                } else {
+                    Crossfade(stateChecked) {
+                        if (it) {
+                            Icon(LucidIcons.CheckCircle, "")
+                        } else {
+                            Icon(LucidIcons.AddCircleOutline, "")
+                        }
+                    }
+                }
+            }
+            Text(
+                text =
+                    if (stateChecked) {
+                        stringResource(Res.string.liked)
+                    } else {
+                        stringResource(Res.string.like)
+                    },
+                style = typo().labelSmall,
+                // Matches [ActionButton], which this sits directly above in every sheet that uses
+                // both — without it the label alone falls back to the colour typo() carries.
+                color = rememberSurfaceDarkColors().content,
+                modifier =
+                    Modifier
+                        .padding(start = 10.dp)
+                        .wrapContentHeight(Alignment.CenterVertically),
+            )
+        }
+    }
+}
+
+@Composable
+fun HeartCheckBox(
+    size: Int = 24,
+    checked: Boolean,
+    tint: Color = rememberSurfaceDarkColors().content,
+    onStateChange: (() -> Unit)? = null,
+) {
+    val burstState = rememberHeartBurstState()
+    Box(
+        modifier =
+            Modifier
+                .size(size.dp)
+                // Before .clip: the burst draws outside the button bounds and the circle clip
+                // would trim it to the heart's own circle.
+                .heartBurst(burstState)
+                .clip(CircleShape)
+                .clickable {
+                    // Judged at TAP time: tapping an unchecked heart is a like. Firing from the
+                    // tap — not from watching `checked` — is what keeps a track change onto an
+                    // already-liked song from celebrating a like nobody gave.
+                    if (!checked) burstState.fire()
+                    onStateChange?.invoke()
+                },
+    ) {
+        Crossfade(targetState = checked, modifier = Modifier.fillMaxSize()) {
+            if (it) {
+                Image(
+                    painter = painterResource(Res.drawable.baseline_favorite_24),
+                    contentDescription = "Favorite checked",
+                    modifier = Modifier.fillMaxSize().padding(4.dp),
+                )
+            } else {
+                Image(
+                    imageVector = LucidIcons.FavoriteBorder,
+                    contentDescription = "Favorite unchecked",
+                    modifier = Modifier.fillMaxSize().padding(4.dp),
+                    colorFilter = ColorFilter.tint(tint),
+                )
+            }
+        }
+    }
+}
+
+@ExperimentalMaterial3Api
+@Composable
+fun PlaybackSpeedPitchBottomSheet(
+    onDismiss: () -> Unit,
+    playbackSpeed: Float,
+    pitch: Int,
+    onSet: (playbackSpeed: Float, pitch: Int) -> Unit,
+) {
+    AppThemeContent {
+        val modelBottomSheetState =
+            rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = onDismiss,
+            sheetState = modelBottomSheetState,
+            containerColor = Color.Transparent,
+            contentColor = Color.Transparent,
+            dragHandle = null,
+            scrimColor = Color.Black.copy(alpha = .5f),
+            contentWindowInsets = { WindowInsets(0, 0, 0, 0) },
+        ) {
+            Card(
+                modifier = Modifier.fillMaxWidth().wrapContentHeight(),
+                shape = rounded(topStart = 20.dp, topEnd = 20.dp),
+                colors = CardDefaults.cardColors().copy(containerColor = rememberSurfaceDarkColors().container),
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                ) {
+                    Card(
+                        modifier = Modifier.width(40.dp).height(4.dp),
+                        colors = CardDefaults.cardColors().copy(containerColor = rememberSurfaceDarkColors().handle),
+                        shape = RoundedCornerShape(50),
+                    ) {}
+                    Spacer(modifier = Modifier.height(16.dp))
+                    // Playback Speed row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Image(
+                            imageVector = LucidIcons.Speed,
+                            contentDescription = stringResource(Res.string.playback_speed),
+                            modifier = Modifier.size(24.dp),
+                            colorFilter = ColorFilter.tint(rememberSurfaceDarkColors().subtitle),
+                        )
+                        Spacer(modifier = Modifier.weight(1f))
+                        IconButton(
+                            onClick = {
+                                val newSpeed = (kotlin.math.floor((playbackSpeed - 0.1f) * 10f) / 10f).coerceIn(0.2f, 2f)
+                                onSet(
+                                    newSpeed,
+                                    pitch,
+                                )
+                            },
+                        ) {
+                            Icon(
+                                LucidIcons.Remove,
+                                contentDescription = "Decrease speed",
+                                tint = rememberSurfaceDarkColors().subtitle,
+                            )
+                        }
+                        Text(
+                            text = "x${String.format("%.1f", playbackSpeed)}",
+                            style = typo().titleMedium,
+                            color = rememberSurfaceDarkColors().subtitle,
+                            modifier = Modifier.widthIn(min = 60.dp),
+                            textAlign = TextAlign.Center,
+                        )
+                        IconButton(
+                            onClick = {
+                                val newSpeed = (kotlin.math.floor((playbackSpeed + 0.1f) * 10f) / 10f).coerceIn(0.2f, 2f)
+                                onSet(
+                                    newSpeed,
+                                    pitch,
+                                )
+                            },
+                        ) {
+                            Icon(
+                                LucidIcons.Add,
+                                contentDescription = "Increase speed",
+                                tint = rememberSurfaceDarkColors().subtitle,
+                            )
+                        }
+                    }
+                    // Shown on every platform. It used to be hidden on Desktop because LibVLC had no
+                    // independent pitch control, but that backend is long gone — mpv shifts pitch with
+                    // its rubberband filter. The control is still locked out while crossfade is on,
+                    // handled by the caller: crossfade owns mpv's filter chain and the two would fight
+                    // over it.
+                    run {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                LucidIcons.Tune,
+                                contentDescription = stringResource(Res.string.pitch),
+                                modifier = Modifier.size(24.dp),
+                                tint = rememberSurfaceDarkColors().subtitle,
+                            )
+                            Spacer(modifier = Modifier.weight(1f))
+                            IconButton(
+                                onClick = {
+                                    val newPitch = (pitch - 1).coerceIn(-12, 12)
+                                    onSet(playbackSpeed, newPitch)
+                                },
+                            ) {
+                                Icon(
+                                    LucidIcons.Remove,
+                                    contentDescription = "Decrease pitch",
+                                    tint = rememberSurfaceDarkColors().subtitle,
+                                )
+                            }
+                            Text(
+                                text = "$pitch",
+                                style = typo().titleMedium,
+                                color = rememberSurfaceDarkColors().subtitle,
+                                modifier = Modifier.widthIn(min = 60.dp),
+                                textAlign = TextAlign.Center,
+                            )
+                            IconButton(
+                                onClick = {
+                                    val newPitch = (pitch + 1).coerceIn(-12, 12)
+                                    onSet(playbackSpeed, newPitch)
+                                },
+                            ) {
+                                Icon(
+                                    LucidIcons.Add,
+                                    contentDescription = "Increase pitch",
+                                    tint = rememberSurfaceDarkColors().subtitle,
+                                )
+                            }
+                        }
+                    }
+                    EndOfModalBottomSheet()
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The sleep timer. Off, it is a grid of lengths where one tap starts the timer and closes (Custom
+ * asks for minutes first). Running, it counts down instead, with +10 min and Turn off.
+ * [timeRemaining] is the service's: minutes left, -1 for end of song, 0 for off.
+ */
+@Composable
+fun SleepTimerBottomSheet(
+    timeRemaining: Int,
+    onDismiss: () -> Unit,
+    onSetTimer: (minutes: Int) -> Unit,
+    onTurnOff: () -> Unit,
+) {
+    SettingSheet(title = stringResource(Res.string.sleep_timer_off), onDismiss = onDismiss) { colors ->
+        val accent = MaterialTheme.colorScheme.primary
+        if (timeRemaining != 0) {
+            val endOfSong = timeRemaining == -1
+            Column(Modifier.fillMaxWidth().padding(vertical = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    if (endOfSong) stringResource(Res.string.sleep_timer_after_song) else stringResource(Res.string.sleep_timer_left, timeRemaining),
+                    style = typo().headlineMedium,
+                    color = accent,
+                )
+                if (!endOfSong) {
+                    // The service counts whole minutes, hence "around".
+                    val at = (Clock.System.now() + timeRemaining.minutes).toLocalDateTime(TimeZone.currentSystemDefault())
+                    Text(
+                        stringResource(Res.string.sleep_timer_pauses_at, "${at.hour.toString().padStart(2, '0')}:${at.minute.toString().padStart(2, '0')}"),
+                        style = typo().bodyMedium,
+                        color = colors.subtitle,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (!endOfSong) {
+                    SleepChip(stringResource(Res.string.sleep_timer_add_ten), accent, colors, Modifier.weight(1f)) { onSetTimer(timeRemaining + 10) }
+                }
+                Button(
+                    onClick = {
+                        onTurnOff()
+                        onDismiss()
+                    },
+                    modifier = Modifier.weight(1f).height(48.dp),
+                    shape = rounded(14.dp),
+                ) { Text(stringResource(Res.string.sleep_timer_turn_off)) }
+            }
+            return@SettingSheet
+        }
+        var custom by rememberSaveable { mutableStateOf(false) }
+        var minutes by rememberSaveable { mutableStateOf("") }
+        val start = { m: Int ->
+            onSetTimer(m)
+            onDismiss()
+        }
+        Text(stringResource(Res.string.sleep_timer_hint), style = typo().bodySmall, color = colors.subtitle)
+        listOf(5, 10, 15, 30, 45, 60).chunked(3).forEach { row ->
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                row.forEach { m ->
+                    val label = if (m == 60) stringResource(Res.string.sleep_timer_hour) else stringResource(Res.string.sleep_timer_minutes, m)
+                    SleepChip(label, accent, colors, Modifier.weight(1f)) { start(m) }
+                }
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SleepChip(stringResource(Res.string.sleep_timer_end), accent, colors, Modifier.weight(1f)) { start(END_OF_SONG_SENTINEL) }
+            SleepChip(stringResource(Res.string.sleep_timer_custom), accent, colors, Modifier.weight(1f), selected = custom) { custom = true }
+        }
+        AnimatedVisibility(custom) {
+            val focus = remember { FocusRequester() }
+            val value = minutes.toIntOrNull() ?: 0
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    value = minutes,
+                    onValueChange = { if (it.all(Char::isDigit) && it.length <= 4) minutes = it },
+                    label = { Text(stringResource(Res.string.sleep_minutes)) },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                )
+                LaunchedEffect(Unit) { focus.requestFocus() }
+                Button(enabled = value > 0, onClick = { start(value) }, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(Res.string.sleep_timer_start))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SleepChip(
+    label: String,
+    accent: Color,
+    colors: SurfaceDarkColors,
+    modifier: Modifier,
+    selected: Boolean = false,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier
+            .height(48.dp)
+            .clip(rounded(14.dp))
+            .background(if (selected) accent.copy(alpha = 0.16f) else colors.content.copy(alpha = 0.06f))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, style = typo().labelSmall, color = if (selected) accent else colors.content)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AddToPlaylistModalBottomSheet(
+    isBottomSheetVisible: Boolean,
+    listLocalPlaylist: List<LocalPlaylistEntity>,
+    // Null while the account's playlists are still loading.
+    listYouTubePlaylist: List<PlaylistsResult>?,
+    videoId: String? = null,
+    onClick: (LocalPlaylistEntity) -> Unit,
+    // Null where the songs can only go into phone playlists: no YouTube tab, and New playlist makes one on the phone.
+    onYTPlaylistClick: ((PlaylistsResult) -> Unit)? = null,
+    onDismiss: () -> Unit,
+) {
+    AppThemeContent {
+        val coroutineScope = rememberCoroutineScope()
+        val modelBottomSheetState =
+            rememberModalBottomSheetState(skipPartiallyExpanded = false)
+        val hideModalBottomSheet: () -> Unit =
+            {
+                coroutineScope.launch {
+                    modelBottomSheetState.hide()
+                    onDismiss()
+                }
+            }
+        val sharedViewModel: SharedViewModel = koinInject()
+        val signedIn = sharedViewModel.getYouTubeLoggedIn().collectAsStateWithLifecycle(DataStoreManager.FALSE).value == DataStoreManager.TRUE
+        val youTube = signedIn && onYTPlaylistClick != null
+        val createdPlaylists by sharedViewModel.createdPlaylists.collectAsStateWithLifecycle()
+        // One just made on YouTube shows until YouTube's own list catches up, as in Library.
+        val youTubePlaylists =
+            remember(listYouTubePlaylist, createdPlaylists) {
+                val loaded = listYouTubePlaylist.orEmpty()
+                val listed = loaded.mapTo(HashSet()) { it.browseId.removePrefix("VL") }
+                createdPlaylists.filter { it.browseId.removePrefix("VL") !in listed } + loaded
+            }
+        var newPlaylist by remember { mutableStateOf(false) }
+        if (newPlaylist) {
+            val lastPickYouTube by sharedViewModel.newPlaylistOnYouTube.collectAsStateWithLifecycle()
+            NewPlaylistSheet(
+                signedIn = signedIn,
+                onYouTube = lastPickYouTube,
+                canPickYouTube = youTube,
+                onDismiss = { newPlaylist = false },
+                onCreate = { title, toYouTube, onResult ->
+                    // Like desktop: the songs go straight into the new playlist, then both sheets close.
+                    sharedViewModel.createPlaylist(title, toYouTube) { created ->
+                        onResult(created != null)
+                        when (created) {
+                            is PlaylistsResult -> onYTPlaylistClick?.invoke(created)
+                            is LocalPlaylistEntity -> onClick(created)
+                        }
+                        if (created != null) {
+                            newPlaylist = false
+                            hideModalBottomSheet()
+                        }
+                    }
+                },
+            )
+        }
+        if (isBottomSheetVisible) {
+            ModalBottomSheet(
+                onDismissRequest = onDismiss,
+                sheetState = modelBottomSheetState,
+                containerColor = Color.Transparent,
+                contentColor = Color.Transparent,
+                dragHandle = null,
+                scrimColor = Color.Black.copy(alpha = .5f),
+                contentWindowInsets = { WindowInsets(0, 0, 0, 0) },
+            ) {
+                Card(
+                    modifier =
+                        Modifier
+                            .padding(top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding())
+                            .fillMaxWidth()
+                            .wrapContentHeight(),
+                    shape = BottomSheetDefaults.ExpandedShape,
+                    colors = CardDefaults.cardColors().copy(containerColor = rememberSurfaceDarkColors().container),
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier =
+                            Modifier
+                                .padding(horizontal = 10.dp)
+                                // The sheet is handed no insets, so nothing else lifts the list above the keyboard.
+                                // Navigation bars are left out: EndOfModalBottomSheet already pads for them.
+                                .windowInsetsPadding(WindowInsets.ime.exclude(WindowInsets.navigationBars)),
+                    ) {
+                        Spacer(modifier = Modifier.height(5.dp))
+                        Card(
+                            modifier = Modifier.width(60.dp).height(4.dp),
+                            colors = CardDefaults.cardColors().copy(containerColor = rememberSurfaceDarkColors().handle),
+                            shape = RoundedCornerShape(50),
+                        ) {}
+                        Spacer(modifier = Modifier.height(5.dp))
+
+                        var query by remember { mutableStateOf("") }
+                        var isSearchFocused by remember { mutableStateOf(false) }
+                        BasicTextField(
+                            value = query,
+                            onValueChange = { query = it },
+                            singleLine = true,
+                            textStyle = typo().labelSmall.copy(color = rememberSurfaceDarkColors().content),
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(start = 12.dp, top = 8.dp, end = 12.dp, bottom = 4.dp)
+                                    .height(40.dp)
+                                    .clip(CircleShape)
+                                    .background(rememberSurfaceDarkColors().content.copy(alpha = 0.08f))
+                                    .onFocusChanged { focusState ->
+                                        isSearchFocused = focusState.isFocused
+                                        // A half-open sheet would leave the results under the keyboard.
+                                        if (focusState.isFocused) coroutineScope.launch { modelBottomSheetState.expand() }
+                                    },
+                            decorationBox = { innerTextField ->
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Icon(
+                                        imageVector = LucidIcons.Search,
+                                        contentDescription = null,
+                                        tint = rememberSurfaceDarkColors().subtitle,
+                                        modifier = Modifier.size(20.dp),
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Box(modifier = Modifier.weight(1f)) {
+                                        if (query.isEmpty()) {
+                                            Text(
+                                                text = stringResource(Res.string.search),
+                                                style = typo().labelSmall,
+                                                color = rememberSurfaceDarkColors().subtitle,
+                                            )
+                                        }
+                                        innerTextField()
+                                    }
+                                    if (query.isEmpty()) {
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                    } else {
+                                        IconButton(onClick = { query = "" }) {
+                                            Icon(
+                                                imageVector = LucidIcons.Close,
+                                                contentDescription = null,
+                                                tint = rememberSurfaceDarkColors().subtitle,
+                                                modifier = Modifier.size(20.dp),
+                                            )
+                                        }
+                                    }
+                                }
+                            },
+                        )
+
+                        // The account's playlists come first and open first; the phone's are the second tab.
+                        var onYouTubeTab by remember(youTube) { mutableStateOf(youTube) }
+                        if (youTube) {
+                            Row(
+                                modifier =
+                                    Modifier
+                                        .horizontalScroll(rememberScrollState())
+                                        .padding(horizontal = 12.dp)
+                                        .padding(vertical = 8.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Chip(
+                                    isAnimated = false,
+                                    isSelected = onYouTubeTab,
+                                    text = stringResource(Res.string.your_youtube_playlists),
+                                    onClick = { onYouTubeTab = true },
+                                )
+                                Chip(
+                                    isAnimated = false,
+                                    isSelected = !onYouTubeTab,
+                                    text = stringResource(Res.string.your_playlists),
+                                    onClick = { onYouTubeTab = false },
+                                )
+                            }
+                        }
+
+                        PlaylistPickRow(
+                            title = stringResource(Res.string.new_playlist),
+                            subtitle = null,
+                            onClick = { newPlaylist = true },
+                        ) {
+                            Box(
+                                modifier =
+                                    Modifier
+                                        .fillMaxSize()
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(LucidIcons.Add, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+
+                        val keyword = query.trim()
+                        // A playlist synced before Sync became a move shows once, as the YouTube one.
+                        val shownLocalPlaylist =
+                            remember(listLocalPlaylist, youTubePlaylists, keyword) {
+                                listLocalPlaylist.withoutYouTubeTwins(youTubePlaylists).filter { it.title.contains(keyword, ignoreCase = true) }
+                            }
+                        val shownYouTubePlaylist =
+                            remember(youTubePlaylists, keyword) { youTubePlaylists.filter { it.title.contains(keyword, ignoreCase = true) } }
+                        // While searching, the list takes the rest of the sheet. Otherwise the sheet resizes with every
+                        // keystroke and drags the field along with it.
+                        val listModifier = if (isSearchFocused || query.isNotEmpty()) Modifier.weight(1f) else Modifier
+                        if (if (onYouTubeTab) shownYouTubePlaylist.isEmpty() else shownLocalPlaylist.isEmpty()) {
+                            // With no playlists at all there is nothing to say: New playlist above is the way on.
+                            Box(listModifier) {
+                                if (onYouTubeTab && listYouTubePlaylist == null) {
+                                    LucidLoader(Modifier.align(Alignment.Center).padding(vertical = 32.dp).size(40.dp))
+                                } else if (keyword.isNotEmpty()) {
+                                    Text(
+                                        text = stringResource(Res.string.no_results_found),
+                                        style = typo().labelSmall,
+                                        modifier = Modifier.padding(20.dp),
+                                        color = rememberSurfaceDarkColors().disabled,
+                                    )
+                                }
+                            }
+                        } else {
+                            Crossfade(onYouTubeTab, modifier = listModifier) { youTubeTab ->
+                                if (youTubeTab) {
+                                    LazyColumn {
+                                        items(shownYouTubePlaylist) { playlist ->
+                                            PlaylistPickRow(
+                                                title = playlist.title,
+                                                subtitle = listOf(playlist.author, playlist.itemCount).filter { it.isNotBlank() }.joinToString(" • "),
+                                                onClick = {
+                                                    onYTPlaylistClick?.invoke(playlist)
+                                                    hideModalBottomSheet()
+                                                },
+                                            ) { PlaylistPickCover(playlist.thumbnails.lastOrNull()?.url) }
+                                        }
+                                    }
+                                } else {
+                                    LazyColumn {
+                                        items(shownLocalPlaylist) { playlist ->
+                                            val count = playlist.tracks?.size ?: 0
+                                            PlaylistPickRow(
+                                                title = playlist.title,
+                                                subtitle = pluralStringResource(Res.plurals.liked_songs_count, count, count),
+                                                added = playlist.tracks?.contains(videoId) == true,
+                                                onClick = {
+                                                    onClick(playlist)
+                                                    hideModalBottomSheet()
+                                                },
+                                            ) { PlaylistPickCover(playlist.thumbnail) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        EndOfModalBottomSheet()
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** A row of the Add to playlist picker: a 48dp cover, the title, and a line under it. [added] greys it out with a tick. */
+@Composable
+private fun PlaylistPickRow(
+    title: String,
+    subtitle: String?,
+    onClick: () -> Unit,
+    added: Boolean = false,
+    cover: @Composable () -> Unit,
+) {
+    val colors = rememberSurfaceDarkColors()
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .clip(rounded(12.dp))
+                .clickable(enabled = !added, onClick = onClick)
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+    ) {
+        Box(Modifier.size(48.dp).clip(rounded(6.dp))) { cover() }
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = typo().titleSmall,
+                color = if (added) colors.disabled else colors.content,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (!subtitle.isNullOrEmpty()) {
+                Text(
+                    text = subtitle,
+                    style = typo().bodySmall,
+                    color = if (added) colors.disabled else colors.subtitle,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        if (added) Icon(LucidIcons.Done, contentDescription = null, tint = colors.subtitle)
+    }
+}
+
+@Composable
+private fun PlaylistPickCover(url: String?) {
+    AsyncImage(
+        model =
+            ImageRequest
+                .Builder(LocalPlatformContext.current)
+                .data(url)
+                .diskCachePolicy(CachePolicy.ENABLED)
+                .diskCacheKey(url)
+                .crossfade(true)
+                .build(),
+        placeholder = rememberHolderPainter(),
+        error = rememberHolderPainter(),
+        fallback = rememberHolderPainter(),
+        contentDescription = null,
+        contentScale = ContentScale.Crop,
+        modifier = Modifier.fillMaxSize(),
+    )
+}
+
+/**
+ * One of a song's artists under the song menu's "Go to artist", lined up with the rows' text: their
+ * photo when the phone has it, else their initial in the accent.
+ */
+@Composable
+private fun ArtistPickRow(
+    name: String,
+    photo: String?,
+    onClick: () -> Unit,
+) {
+    val c = rememberSurfaceDarkColors()
+    val accent = MaterialTheme.colorScheme.primary
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = 78.dp, end = 32.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(32.dp).clip(CircleShape).background(accent.copy(alpha = 0.16f)), contentAlignment = Alignment.Center) {
+            if (photo != null) {
+                AsyncImage(model = photo, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            } else {
+                // Two chars when the first is half of a surrogate pair, so an emoji stays whole.
+                val trimmed = name.trim()
+                Text(
+                    trimmed.take(if (trimmed.firstOrNull()?.isHighSurrogate() == true) 2 else 1).uppercase(),
+                    style = typo().labelSmall,
+                    color = accent,
+                )
+            }
+        }
+        Text(
+            name,
+            style = typo().labelSmall,
+            color = c.content,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f).padding(start = 12.dp),
+        )
+        Icon(LucidIcons.ArrowForwardIos, contentDescription = null, tint = c.subtitle, modifier = Modifier.size(14.dp))
+    }
+}
+
+@Composable
+@ExperimentalMaterial3Api
+/**
+ * The ⋮ menu of a YouTube playlist or an album, in Lucid desktop's order. A null action hides
+ * its row: a radio has no radio of its own and only your own playlists can be edited. The
+ * shortcut row says Add or Remove, whichever applies; neither shows on the page's own menu.
+ */
+fun PlaylistBottomSheet(
+    onDismiss: () -> Unit,
+    // Null for a list with no YouTube page behind it (Liked songs on the phone, Downloads).
+    shareLink: String?,
+    onPlayNext: () -> Unit,
+    onAddToQueue: () -> Unit,
+    onStartRadio: (() -> Unit)?,
+    onSaveToPlaylist: () -> Unit,
+    onEditPlaylist: (() -> Unit)? = null,
+    onDeletePlaylist: (() -> Unit)? = null,
+    onRemoveShortcut: (() -> Unit)? = null,
+    onAddShortcut: (() -> Unit)? = null,
+    onPlay: () -> Unit,
+    onShufflePlay: () -> Unit,
+    // Only from the page itself: a Home shortcut's menu has no rows to pick.
+    onSelectTracks: (() -> Unit)? = null,
+) {
+    AppThemeContent {
+        val coroutineScope = rememberCoroutineScope()
+        val modelBottomSheetState =
+            rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val hideModalBottomSheet: () -> Unit =
+            {
+                coroutineScope.launch {
+                    modelBottomSheetState.hide()
+                    onDismiss()
+                }
+            }
+        ModalBottomSheet(
+            onDismissRequest = onDismiss,
+            sheetState = modelBottomSheetState,
+            containerColor = Color.Transparent,
+            contentColor = Color.Transparent,
+            dragHandle = null,
+            scrimColor = Color.Black.copy(alpha = .5f),
+            contentWindowInsets = { WindowInsets(0) },
+        ) {
+            Card(
+                modifier = Modifier.fillMaxWidth().wrapContentHeight(),
+                shape = rounded(topStart = 20.dp, topEnd = 20.dp),
+                colors = CardDefaults.cardColors().copy(containerColor = rememberSurfaceDarkColors().container),
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Spacer(modifier = Modifier.height(5.dp))
+                    Card(
+                        modifier = Modifier.width(60.dp).height(4.dp),
+                        colors = CardDefaults.cardColors().copy(containerColor = rememberSurfaceDarkColors().handle),
+                        shape = RoundedCornerShape(50),
+                    ) {}
+                    Spacer(modifier = Modifier.height(5.dp))
+                    val run: (() -> Unit) -> Unit = { action ->
+                        action()
+                        hideModalBottomSheet()
+                    }
+                    PlayActionRow(onPlay = { run(onPlay) }, onShufflePlay = { run(onShufflePlay) })
+                    ActionButton(icon = LucidIcons.PlayCircle, text = Res.string.play_next) { run(onPlayNext) }
+                    ActionButton(icon = LucidIcons.QueueMusic, text = Res.string.add_to_queue) { run(onAddToQueue) }
+                    if (onStartRadio != null) {
+                        ActionButton(icon = LucidIcons.Sensors, text = Res.string.start_radio) { run(onStartRadio) }
+                    }
+                    ActionButton(icon = LucidIcons.PlaylistAdd, text = Res.string.save_to_playlist) { run(onSaveToPlaylist) }
+                    if (onSelectTracks != null) {
+                        ActionButton(icon = LucidIcons.SelectAll, text = Res.string.select_tracks) { run(onSelectTracks) }
+                    }
+                    if (shareLink != null) {
+                        val shareTitle = stringResource(Res.string.share)
+                        ActionButton(icon = LucidIcons.Share, text = Res.string.share) {
+                            shareUrl(shareTitle, shareLink)
+                        }
+                    }
+                    ShortcutRow(onAddShortcut, onRemoveShortcut, run)
+                    if (onEditPlaylist != null) {
+                        ActionButton(icon = LucidIcons.Edit, text = Res.string.edit_playlist) { run(onEditPlaylist) }
+                    }
+                    if (onDeletePlaylist != null) {
+                        val danger = MaterialTheme.colorScheme.error
+                        ActionButton(
+                            icon = LucidIcons.Delete,
+                            text = Res.string.delete_playlist,
+                            textColor = danger,
+                            iconColor = danger,
+                        ) { run(onDeletePlaylist) }
+                    }
+                    EndOfModalBottomSheet()
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The ⋮ menu of a playlist on this device: [PlaylistBottomSheet]'s rows minus radio and share
+ * (there is no YouTube playlist behind it), plus Move to YouTube Music when [onMoveToYouTube] is
+ * given (signed in).
+ */
+/** Desktop's Add to shortcuts / Remove from shortcuts row: whichever of the two is given. */
+@Composable
+internal fun ShortcutRow(
+    onAdd: (() -> Unit)?,
+    onRemove: (() -> Unit)?,
+    run: (() -> Unit) -> Unit,
+) {
+    when {
+        onRemove != null -> ActionButton(icon = LucidIcons.GridView, text = Res.string.remove_shortcut) { run(onRemove) }
+        onAdd != null -> ActionButton(icon = LucidIcons.GridView, text = Res.string.add_to_shortcuts) { run(onAdd) }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun LocalPlaylistBottomSheet(
+    onDismiss: () -> Unit,
+    onPlayNext: () -> Unit,
+    onAddToQueue: () -> Unit,
+    onSaveToPlaylist: () -> Unit,
+    onEditPlaylist: () -> Unit,
+    onMoveToYouTube: (() -> Unit)?,
+    onDelete: () -> Unit,
+    onRemoveShortcut: (() -> Unit)? = null,
+    onAddShortcut: (() -> Unit)? = null,
+    onPlay: () -> Unit,
+    onShufflePlay: () -> Unit,
+    onSelectTracks: (() -> Unit)? = null,
+) {
+    MenuSheet(onDismiss) { run ->
+        PlayActionRow(onPlay = { run(onPlay) }, onShufflePlay = { run(onShufflePlay) })
+        ActionButton(icon = LucidIcons.PlayCircle, text = Res.string.play_next) { run(onPlayNext) }
+        ActionButton(icon = LucidIcons.QueueMusic, text = Res.string.add_to_queue) { run(onAddToQueue) }
+        ActionButton(icon = LucidIcons.PlaylistAdd, text = Res.string.save_to_playlist) { run(onSaveToPlaylist) }
+        if (onSelectTracks != null) {
+            ActionButton(icon = LucidIcons.SelectAll, text = Res.string.select_tracks) { run(onSelectTracks) }
+        }
+        ShortcutRow(onAddShortcut, onRemoveShortcut, run)
+        ActionButton(icon = LucidIcons.Edit, text = Res.string.edit_playlist) { run(onEditPlaylist) }
+        if (onMoveToYouTube != null) {
+            ActionButton(icon = LucidIcons.Cloud, text = Res.string.move_to_youtube_music) { run(onMoveToYouTube) }
+        }
+        val danger = MaterialTheme.colorScheme.error
+        ActionButton(
+            icon = LucidIcons.Delete,
+            text = Res.string.delete_playlist,
+            textColor = danger,
+            iconColor = danger,
+        ) { run(onDelete) }
+    }
+}
+
+/**
+ * An artist card's menu, desktop's card rows that Android has: radio, follow, share. A null action
+ * greys its row out, so the sheet keeps its size while the artist loads.
+ */
+@Composable
+fun ArtistBottomSheet(
+    onDismiss: () -> Unit,
+    followed: Boolean,
+    onStartRadio: (() -> Unit)?,
+    onFollow: (() -> Unit)?,
+    shareLink: String,
+) {
+    MenuSheet(onDismiss) { run ->
+        ActionButton(icon = LucidIcons.Sensors, text = Res.string.start_radio, enable = onStartRadio != null) {
+            onStartRadio?.let(run)
+        }
+        ActionButton(
+            icon = if (followed) LucidIcons.Check else LucidIcons.PersonAdd,
+            text = if (followed) Res.string.unfollow else Res.string.follow,
+            enable = onFollow != null,
+        ) { onFollow?.let(run) }
+        val shareTitle = stringResource(Res.string.share)
+        ActionButton(icon = LucidIcons.Share, text = Res.string.share) { shareUrl(shareTitle, shareLink) }
+    }
+}
+
+/**
+ * A downloaded playlist or album, from its download button: how far it got, Download missing, the
+ * songs YouTube refused (opened in place) and Remove download, which takes a second tap: a big
+ * playlist is a lookup per song to fetch again.
+ */
+@Composable
+fun CollectionDownloadSheet(
+    title: String,
+    thumbnail: String?,
+    download: CollectionDownload,
+    rereadsList: Boolean,
+    onDownloadMissing: () -> Unit,
+    onRemove: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    MenuSheet(onDismiss) { run ->
+        val colors = rememberSurfaceDarkColors()
+        val accent = MaterialTheme.colorScheme.primary
+        val danger = MaterialTheme.colorScheme.error
+        val wanted = download.total - download.refused
+        SongMenuHeader(thumbnail, title, stringResource(Res.string.download_progress_text, download.downloaded, download.total), liked = null)
+        if (download.downloaded < wanted) {
+            LinearProgressIndicator(
+                progress = { download.downloaded.toFloat() / wanted.coerceAtLeast(1) },
+                modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 8.dp),
+                color = accent,
+                trackColor = accent.copy(alpha = 0.16f),
+            )
+        }
+        Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+            if (download.active == 0 && (rereadsList || download.downloaded + download.refused < download.total)) {
+                ActionButton(
+                    icon = LucidIcons.Download,
+                    text = Res.string.download_missing,
+                    subtitle = if (rereadsList) stringResource(Res.string.download_missing_rereads) else null,
+                ) { run(onDownloadMissing) }
+            }
+            if (download.refusedSongs.isNotEmpty()) {
+                var open by remember { mutableStateOf(false) }
+                val turn by animateFloatAsState(if (open) 180f else 0f)
+                ActionButton(
+                    icon = LucidIcons.Error,
+                    text = Res.string.failed_downloads,
+                    subtitle = pluralStringResource(Res.plurals.download_refused, download.refused, download.refused),
+                    trailing = { Icon(LucidIcons.KeyboardArrowDown, null, Modifier.rotate(turn), tint = colors.subtitle) },
+                ) { open = !open }
+                AnimatedVisibility(open) {
+                    Column {
+                        Text(
+                            stringResource(Res.string.failed_downloads_reason),
+                            // Under the row's text: 20 row inset + 48 icon + 10 gap.
+                            Modifier.padding(start = 78.dp, end = 20.dp, bottom = 4.dp),
+                            style = typo().bodySmall,
+                            color = colors.subtitle,
+                        )
+                        // No tap: YouTube won't play them either.
+                        download.refusedSongs.forEach { song ->
+                            SongFullWidthItems(songEntity = song, isPlaying = false, modifier = Modifier)
+                        }
+                    }
+                }
+            }
+            var armed by remember { mutableStateOf(false) }
+            ActionButton(
+                icon = LucidIcons.Delete,
+                text = if (armed) Res.string.tap_again_to_remove else Res.string.remove_download,
+                textColor = danger,
+                iconColor = danger,
+                subtitle = stringResource(Res.string.download_kept_note),
+            ) { if (armed) run(onRemove) else armed = true }
+        }
+    }
+}
+
+/** The ⋮ menus' frame: the card on the menu colour, a handle, then the rows. [content]'s run does an action, then closes. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MenuSheet(
+    onDismiss: () -> Unit,
+    content: @Composable ColumnScope.(run: (() -> Unit) -> Unit) -> Unit,
+) {
+    AppThemeContent {
+        val coroutineScope = rememberCoroutineScope()
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val run: (() -> Unit) -> Unit = { action ->
+            action()
+            coroutineScope.launch {
+                sheetState.hide()
+                onDismiss()
+            }
+        }
+        ModalBottomSheet(
+            onDismissRequest = onDismiss,
+            sheetState = sheetState,
+            containerColor = Color.Transparent,
+            contentColor = Color.Transparent,
+            dragHandle = null,
+            scrimColor = Color.Black.copy(alpha = .5f),
+            contentWindowInsets = { WindowInsets(0, 0, 0, 0) },
+        ) {
+            Card(
+                modifier = Modifier.fillMaxWidth().wrapContentHeight(),
+                shape = rounded(topStart = 20.dp, topEnd = 20.dp),
+                colors = CardDefaults.cardColors().copy(containerColor = rememberSurfaceDarkColors().container),
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Spacer(modifier = Modifier.height(5.dp))
+                    Card(
+                        modifier = Modifier.width(60.dp).height(4.dp),
+                        colors = CardDefaults.cardColors().copy(containerColor = rememberSurfaceDarkColors().handle),
+                        shape = RoundedCornerShape(50),
+                    ) {}
+                    Spacer(modifier = Modifier.height(5.dp))
+                    content(run)
+                    EndOfModalBottomSheet()
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun DevLogInBottomSheet(
+    onDismiss: () -> Unit,
+    type: DevLogInType,
+    onDone: (String) -> Unit,
+) {
+    val coroutineScope = rememberCoroutineScope()
+    val modelBottomSheetState =
+        rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    var value by rememberSaveable { mutableStateOf("") }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = modelBottomSheetState,
+        containerColor = Color.Transparent,
+        contentColor = Color.Transparent,
+        dragHandle = null,
+        scrimColor = Color.Black.copy(alpha = .5f),
+        contentWindowInsets = { WindowInsets(0, 0, 0, 0) },
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth().wrapContentHeight(),
+            shape = rounded(topStart = 20.dp, topEnd = 20.dp),
+            colors = CardDefaults.cardColors().copy(containerColor = rememberSurfaceDarkColors().container),
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Spacer(modifier = Modifier.height(5.dp))
+                Card(
+                    modifier = Modifier.width(60.dp).height(4.dp),
+                    colors = CardDefaults.cardColors().copy(containerColor = rememberSurfaceDarkColors().handle),
+                    shape = RoundedCornerShape(50),
+                ) {}
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(text = runBlocking { type.getTitle() }, style = typo().labelSmall)
+                Spacer(modifier = Modifier.height(5.dp))
+                OutlinedTextField(
+                    value = value,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                    onValueChange = { value = it },
+                    maxLines = 1,
+                )
+                Spacer(modifier = Modifier.height(5.dp))
+                TextButton(
+                    onClick = {
+                        if (value.isNotEmpty() && value.isNotBlank()) {
+                            showToast(runBlocking { getString(Res.string.processing) }, ToastGravity.Bottom)
+                            onDismiss()
+                            onDone(value)
+                        } else {
+                            showToast(runBlocking { getString(Res.string.can_not_be_empty) }, ToastGravity.Bottom)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                ) {
+                    Text(text = stringResource(Res.string.set), style = typo().labelSmall)
+                }
+                Spacer(modifier = Modifier.height(5.dp))
+                EndOfModalBottomSheet()
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun DevCookieLogInBottomSheet(
+    onDismiss: () -> Unit,
+    type: DevLogInType,
+    cookies: List<Pair<String, String?>>,
+) {
+    val clipboardManager = LocalClipboard.current
+    val coroutineScope = rememberCoroutineScope()
+    val modelBottomSheetState =
+        rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = modelBottomSheetState,
+        containerColor = Color.Transparent,
+        contentColor = Color.Transparent,
+        dragHandle = null,
+        scrimColor = Color.Black.copy(alpha = .5f),
+        contentWindowInsets = { WindowInsets(0, 0, 0, 0) },
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth().wrapContentHeight(),
+            shape = rounded(topStart = 20.dp, topEnd = 20.dp),
+            colors = CardDefaults.cardColors().copy(containerColor = rememberSurfaceDarkColors().container),
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Spacer(modifier = Modifier.height(5.dp))
+                Card(
+                    modifier = Modifier.width(60.dp).height(4.dp),
+                    colors = CardDefaults.cardColors().copy(containerColor = rememberSurfaceDarkColors().handle),
+                    shape = RoundedCornerShape(50),
+                ) {}
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = stringResource(Res.string.list_all_cookies_of_this_page),
+                    style = typo().labelSmall,
+                )
+                cookies.forEach { cookie ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.padding(12.dp),
+                    ) {
+                        Text(text = cookie.first, style = typo().bodyMedium, modifier = Modifier.weight(1f))
+                        SelectionContainer(modifier = Modifier.weight(2f)) {
+                            Text(text = cookie.second ?: "", style = typo().bodyMedium)
+                        }
+                        val copied = stringResource(Res.string.copied_to_clipboard)
+                        IconButton(onClick = {
+                            copyToClipboard(cookie.first, cookie.second ?: "")
+                            showToast(copied, ToastGravity.Bottom)
+                        }) {
+                            Icon(imageVector = LucidIcons.ContentCopy, contentDescription = "Copy")
+                        }
+                    }
+                }
+                EndOfModalBottomSheet()
+            }
+        }
+    }
+}
+
+@Composable
+fun EndOfModalBottomSheet() {
+    Box(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .height(
+                    WindowInsets.navigationBars
+                        .asPaddingValues()
+                        .calculateBottomPadding()
+                        .value
+                        .toInt()
+                        .dp + 8.dp,
+                ),
+    ) {}
+}
+
+sealed class DevLogInType {
+
+    data object YouTube : DevLogInType()
+
+    suspend fun getTitle(): String =
+        when (this) {
+            is YouTube -> getString(Res.string.your_youtube_cookie)
+        }
+}
